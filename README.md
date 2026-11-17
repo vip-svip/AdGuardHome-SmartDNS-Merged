@@ -171,3 +171,22 @@ cd module && zip -r ../AdGuardHome-SmartDNS-Merged.zip . -x '*.DS_Store'
 
 - [AdGuard Home](https://github.com/AdguardTeam/AdGuardHome) — AGPL-3.0
 - [SmartDNS](https://github.com/pymumu/smartdns) — GPL-3.0
+
+---
+
+## 发版（更新 Releases）
+
+改完 `module/` 并推到 `main` 之后，跑一条命令就会打包、建 tag、更新 Release 并挂上 zip：
+
+```bash
+python tools/release.py                    # tag 用 module.prop 里的 version
+python tools/release.py --dry-run          # 只看会做什么
+python tools/release.py --notes "本次修了 xxx"
+```
+
+Token 读 `GITHUB_TOKEN` 环境变量或仓库外层的 `.gh_token`（不要提交进仓库）。
+
+> 仓库里也有 `.github/workflows/release.yml`（push `v*` tag 自动发版），
+> 但当前账号下 Actions 跑不起来（run 3 秒即失败、0 个 step），所以实际用 `tools/release.py`。
+> 想用 Actions 的话去 Settings → Actions → General 把 Workflow permissions 改成
+> **Read and write permissions**，并确认账号 Actions 配额没耗尽。
