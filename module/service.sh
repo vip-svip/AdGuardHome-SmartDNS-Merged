@@ -380,6 +380,54 @@ start_webui() {
 start_webui
 
 # ---------------------------------------------------------------
+# 过滤器自愈：全新安装 / 升级后 rules/subscriptions 被清空时，AGH 不会主动
+# 重新下载（要等 filters_update_interval 到期），表现是「装了模块但广告照样弹」。
+# 这里在「所有过滤器 rules_count 全为 0」时用本地 API 触发一次刷新。
+# 凭据取 scripts/config.prop 的 agh_user / agh_pass（默认 root/root）。
+# ---------------------------------------------------------------
+agh_filter_heal() {
+    command -v curl >/dev/null 2>&1 || return 0
+    _port=$(awk '/^http:/{f=1;next} f&&/^[^[:space:]]/{exit} f&&/^[[:space:]]*address:/{print $2;exit}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null)
+    _port=${_port##*:}
+    [ -n "$_port" ] || _port=40251
+    _u=$(sed -n 's/^[[:space:]]*agh_user=//p' "$SCRIPT_DIR/config.prop" 2>/dev/null)
+    _p=$(sed -n 's/^[[:space:]]*agh_pass=//p' "$SCRIPT_DIR/config.prop" 2>/dev/null)
+    [ -n "$_u" ] || _u=root
+    [ -n "$_p" ] || _p=root
+    _ck="/data/local/tmp/.agh_ck.$$"
+    _lc=$(curl -s -m 6 -o /dev/null -w '%{http_code}' -c "$_ck" \
+          -H "Content-Type: application/json" \
+          -d "{\"name\":\"$_u\",\"password\":\"$_p\"}" \
+          "http://127.0.0.1:$_port/control/login" 2>/dev/null)
+    if [ "$_lc" != "200" ]; then
+        rm -f "$_ck"
+        [ "$lang" = "zh" ] && log "[WARN] 无法登录 AGH API（HTTP ${_lc:-无}，改 config.prop 的 agh_user/agh_pass），跳过过滤器自愈。" \
+                           || log "[WARN] AGH API login failed (HTTP ${_lc:-none}); set agh_user/agh_pass in config.prop to enable filter self-heal."
+        return 0
+    fi
+    _total=$(curl -s -m 15 -b "$_ck" "http://127.0.0.1:$_port/control/filtering/status" 2>/dev/null \
+             | tr ',' '\n' | awk -F: '/rules_count/{gsub(/[^0-9]/,"",$2); s+=$2} END{print s+0}')
+    if [ "${_total:-0}" -eq 0 ]; then
+        _ids=$(awk '/^filters:/{f=1;next} f&&/^[^[:space:]-]/{exit} f&&/^[[:space:]]+id:/{gsub(/[^0-9]/,"",$2); printf "%s,", $2}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null | sed 's/,$//')
+        if [ -z "$_ids" ]; then
+            rm -f "$_ck"
+            return 0
+        fi
+        _r=$(curl -s -m 180 -b "$_ck" -H "Content-Type: application/json" \
+             -d "{\"whitelist\":false,\"ids\":[$_ids]}" \
+             "http://127.0.0.1:$_port/control/filtering/refresh" 2>/dev/null)
+        [ "$lang" = "zh" ] && log "过滤器缓存为空，已触发重新下载：${_r:-无响应}" \
+                           || log "Filter caches were empty; triggered a fresh download: ${_r:-no response}"
+        _after=$(curl -s -m 15 -b "$_ck" "http://127.0.0.1:$_port/control/filtering/status" 2>/dev/null \
+                 | tr ',' '\n' | awk -F: '/rules_count/{gsub(/[^0-9]/,"",$2); s+=$2} END{print s+0}')
+        [ "$lang" = "zh" ] && log "过滤器自愈完成，规则总数 ${_after:-0}" \
+                           || log "Filter self-heal done; total rules ${_after:-0}"
+    else
+        rm -f "$_ck"
+    fi
+}
+
+# ---------------------------------------------------------------
 # 启动 AdGuardHome
 # ---------------------------------------------------------------
 if ! agh_running; then
@@ -398,6 +446,9 @@ if ! agh_running; then
         [ "$lang" = "zh" ] && log "AdGuardHome 启动失败，尝试重启..." || log "AdGuardHome failed to start, attempting restart..."
     fi
 fi
+
+# 过滤器缓存为空时自动重新下载（全新安装 / 跨版本升级后必备，否则没有拦截效果）
+agh_filter_heal
 
 # ---------------------------------------------------------------
 # 启动模块附加脚本

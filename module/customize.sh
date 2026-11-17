@@ -451,7 +451,17 @@ fi
 # 正在保留配置文件
 [ -f "$BACKUP_DIR/config.prop" ] && \
 old_line=$(grep -m1 '^PROXY_URL=' "$BACKUP_DIR/config.prop") && \
-[ -n "$old_line" ] && { sed -i "/^PROXY_URL=/d" "$SCRIPT_DIR/config.prop"; printf "%s" "$old_line" >> "$SCRIPT_DIR/config.prop"; i18n_print "- Preserved PROXY_URL from backup" "- 已从备份恢复 PROXY_URL"; }
+[ -n "$old_line" ] && { sed -i "/^PROXY_URL=/d" "$SCRIPT_DIR/config.prop"; printf "%s\n" "$old_line" >> "$SCRIPT_DIR/config.prop"; i18n_print "- Preserved PROXY_URL from backup" "- 已从备份恢复 PROXY_URL"; }
+# VPN 共存选择也要跟着升级保留，否则每次刷入都会被重置回 auto
+for _k in vpn_compat vpn_apps agh_user agh_pass; do
+    [ -f "$BACKUP_DIR/config.prop" ] || break
+    _kv=$(grep -m1 "^[[:space:]]*$_k=" "$BACKUP_DIR/config.prop" 2>/dev/null)
+    [ -n "$_kv" ] || continue
+    sed -i "/^[[:space:]]*$_k=/d" "$SCRIPT_DIR/config.prop" 2>/dev/null
+    [ -n "$(tail -c 1 "$SCRIPT_DIR/config.prop" 2>/dev/null)" ] && printf "\n" >> "$SCRIPT_DIR/config.prop"
+    printf "%s\n" "$_kv" >> "$SCRIPT_DIR/config.prop"
+    i18n_print "- Preserved $_k from backup" "- 已从备份恢复 $_k"
+done
 # 重新锁定模块目录脚本，防止被篡改
 # 只锁不该被就地修改的脚本；service.sh / customize.sh 必须保持可覆盖，
 # 否则升级时 unzip 报 Operation not permitted、模块永远停在旧版安装逻辑。

@@ -1,6 +1,26 @@
-# 注：以下修改后必须重启生效
+# 注：以下修改后必须重启生效（vpn_compat 例外，守护循环 5 秒内自动生效）
 # AdGuardHome DNS 重定向端口
 redir_port=5591
 
 # 代理订阅链接（在引号内填入你的订阅）
 PROXY_URL=" "
+
+# ---------------------------------------------------------------
+# VPN 共存模式（也可在 6081 管理页「VPN 共存」里一键切换）
+#   auto   默认。检测到 VPN / 代理的隧道接口（tun* / tap* / ppp* / utun* /
+#          wg* / ipsec*，且必须是 UP 状态）时，自动把 DNS 劫持让路：链清空、
+#          跳转从 OUTPUT 摘掉，解析完全交给 VPN；VPN 断开后 5 秒内自动恢复劫持。
+#   proxy  串联共存。始终保留 DNS 劫持，但「出接口是隧道」的查询和 VPN / 代理
+#          应用自身 uid 的查询不会被劫持 —— 避免 Clash/mihomo 自己的 DNS 被抢、
+#          避免 AGH→隧道→Clash DNS→AGH 的解析环。想让 AGH 继续过滤 VPN 流量选这个。
+#   off    不做任何 VPN 判断，全量劫持（老行为）。
+vpn_compat=auto
+
+# proxy 模式下额外豁免的 VPN / 代理应用包名（空格分隔，可留空；
+# 常见客户端已内置：Clash Meta / Clash Mi / Clash 原版 / Surfboard / v2rayNG /
+# SagerNet / 各 vless / v2ray 客户端）
+vpn_apps=""
+# AGH 本地 API 凭据：过滤器自愈（缓存为空时自动重新下载规则）要用，默认 root/root
+# 如果你在 AGH 网页里改过登录密码，把这里同步改掉，否则只会跳过自愈并记一条 WARN。
+agh_user=root
+agh_pass=root

@@ -43,6 +43,11 @@
   li:last-child{border-bottom:0}
   li .srv{word-break:break-all}
   li .badge{font-size:11px;color:var(--dim);font-family:inherit;margin-left:6px}
+  h2 .badge{font-size:11px;font-weight:600;font-family:inherit;margin-left:8px;
+    padding:1px 8px;border-radius:999px;vertical-align:middle;
+    color:var(--dim);background:rgba(127,127,127,.14)}
+  h2 .badge.ok{color:var(--ok);background:rgba(34,197,94,.16)}
+  h2 .badge.warn{color:#eab308;background:rgba(234,179,8,.16)}
   li .u{flex:1;word-break:break-all}
   li .tag{flex:0 0 auto}
   .msg{margin-top:10px;font-size:13px;min-height:20px;line-height:1.5}
@@ -115,6 +120,28 @@
     <div class="chips" id="encChips"></div>
     <div class="msg" id="encMsg"></div>
     <ul id="encList"><li style="color:var(--dim)">加载中…</li></ul>
+  </div>
+
+  <div class="card">
+    <h2>VPN 共存 <span class="badge" id="vpnBadge">检测中…</span></h2>
+    <div class="sub" style="margin-bottom:8px">
+      <b>auto</b>（默认）检测到 VPN / 代理的隧道接口就把 DNS 劫持让路，解析完全交给 VPN，断开后 5 秒内自动恢复劫持。<br>
+      <b>proxy</b> 仍做 DNS 劫持，但「出接口是隧道」的查询和 VPN 应用自身的查询不劫持 —— 想让 AGH 继续过滤 VPN 流量选这个。<br>
+      <b>off</b> 不做任何 VPN 判断，全量劫持（老行为）。<br>
+      <span style="color:var(--dim)">改这一项不用重启；脚本 5 秒内自己重建规则。</span>
+    </div>
+    <div class="row">
+      <select id="vpnMode" style="flex:1;min-width:120px;height:40px;border-radius:10px;
+              border:1px solid var(--line);background:var(--bg2);color:var(--fg);padding:0 8px">
+        <option value="auto">auto · 让路（推荐）</option>
+        <option value="proxy">proxy · 串联</option>
+        <option value="off">off · 全量劫持</option>
+      </select>
+      <button class="primary" id="btnVpnApply">应用</button>
+      <button id="btnVpnRefresh">刷新状态</button>
+    </div>
+    <div class="msg" id="vpnMsg"></div>
+    <div class="sub" id="vpnState" style="margin-top:6px;color:var(--dim)">读取中…</div>
   </div>
 
   <div class="card">
@@ -526,6 +553,70 @@
     });
   }
 
+  // ---------------- VPN 共存 ----------------
+  function vpnSay(t, kind) {
+    var el = $('vpnMsg');
+    if (!el) return;
+    el.textContent = t || '';
+    el.className = 'msg' + (kind ? ' ' + kind : '');
+    if (t) { setTimeout(function () { el.textContent = ''; }, 6000); }
+  }
+
+  function vpnRender(r) {
+    var badge = $('vpnBadge'), st = $('vpnState');
+    if (!r || !r.ok) {
+      if (badge) { badge.textContent = '未知'; }
+      if (st) { st.textContent = (r && r.error) ? r.error : '读取 VPN 状态失败'; }
+      return;
+    }
+    var mode = r.mode || 'auto';
+    var sel = $('vpnMode');
+    if (sel) { sel.value = mode; }
+    var ifs = (r.ifaces || '').trim();
+    var active = !!r.vpn_active;
+    var hij = r.hijack;
+    if (badge) {
+      badge.textContent = hij ? '劫持生效' : '已让路';
+      badge.className = 'badge ' + (hij ? 'ok' : 'warn');
+    }
+    if (st) {
+      var lines = [];
+      lines.push('模式 ' + mode + (active ? ' ｜ 检测到隧道接口 ' + ifs : ' ｜ 未检测到隧道接口'));
+      lines.push('OUTPUT 跳转 ' + (r.jump ? '在' : '不在') +
+                 ' ｜ ADGUARD 链 ' + (r.rules || 0) + ' 条' +
+                 ' ｜ REDIRECT ' + (r.redirect ? (r.redirect + ' 条') : '无'));
+      if (r.uids) { lines.push('已豁免 VPN 应用 uid：' + r.uids); }
+      if (r.note) { lines.push(r.note); }
+      st.innerHTML = lines.join('<br>');
+    }
+  }
+
+  function vpnLoad() {
+    return call('action=vpnstatus')
+      .then(function (r) { vpnRender(r); return r; })
+      .catch(function () { vpnRender(null); });
+  }
+
+  function vpnApply() {
+    var sel = $('vpnMode');
+    if (!sel) return;
+    var m = sel.value;
+    var btn = $('btnVpnApply');
+    btn.disabled = true;
+    call('action=vpnmode&mode=' + encodeURIComponent(m))
+      .then(function (r) {
+        btn.disabled = false;
+        if (r && r.ok) {
+          vpnSay(r.msg || '已切换', 'ok');
+          vpnRender(r);
+          setTimeout(vpnLoad, 2500);
+        } else {
+          vpnSay((r && r.error) || '切换失败', 'err');
+        }
+      })
+      .catch(function (e) { btn.disabled = false; vpnSay('请求失败：' + e.message, 'err'); });
+  }
+
   function encLoad() {
     return call('action=enclist').then(function (r) {
       if (r && r.ok) encRender(r.list, r.running);
@@ -606,6 +697,9 @@
 
   load();
   encLoad();
+  vpnLoad();
+  if ($('btnVpnApply')) { $('btnVpnApply').onclick = vpnApply; }
+  if ($('btnVpnRefresh')) { $('btnVpnRefresh').onclick = function () { vpnLoad(); }; }
   ruleChips();
   ruleLoad();
   $('btnRuleAdd').onclick = ruleAdd;

@@ -1,7 +1,7 @@
 id=AdGuardHome
 name=AdGuard Home For Android
-version=20261116-v30
-versionCode=2026111630
+version=20261116-v31
+versionCode=2026111631
 author=vip-svip
-description=[v30] AdGuard Home 20261116-v30（上游入口只留在 SmartDNS「上游服务器」页刷新按钮右边，AGH 侧栏里那个入口已移除；上游管理页新增「返回」按钮；加密上游预设换成实测最快的一批 —— 阿里 DoH(IP) 105ms / DoH(IP2) 107ms / DoT(IP2) 108ms / DoT(IP) 110ms / 阿里 DoQ 115ms / 阿里 DoH(域名) 134ms / DoT(域名) 138ms / 360 DoH 138ms / DNSPod DoH 178ms / DNSPod DoT 183ms / 腾讯 DoT 244ms / 腾讯 DoH 250ms；已剔除 dns.google、Cloudflare、AdGuard、dns.qq.com 等全部超时项） + SmartDNS 48.5-RC1 + data-dir 持久化修「请求处理已暂停」 + 卸载数据快照可恢复（AGH 40251 · smartdns 6080 · 上游管理 6081）
+description=[v31] AdGuard Home 20261116-v31，重点：不再和 VPN 冲突。新增 vpn_compat 三种模式（6081 管理页「VPN 共存」卡片可一键切换，也可写 scripts/config.prop）：auto 默认，检测到 tun/tap/ppp/utun/wg/ipsec 隧道接口就把 DNS 劫持让路（ADGUARD 链清空成只 RETURN、从 OUTPUT 摘掉跳转），解析完全交给 VPN，断开 5 秒内自动恢复；proxy 串联共存，始终劫持但豁免隧道出流量（lo/tun+/tap+/ppp+/utun+/wg+/ipsec+）、以及 Clash/mihomo/v2ray 等 VPN 应用自身 uid 的查询，避免解析环；off 退回全量劫持。跳转从 -I 改 -A 追加到 OUTPUT 末尾，不抢代理自己的 dport 53 规则；只动自己的 ADGUARD/ADGUARD6 链。另修：config.prop 的 redir_port 与 AGH yaml dns.port 脱钩会导致 DNS 全挂，现在每次以 yaml 为准自动校正；管理页切换模式立刻重建规则（--once），重建加 mkdir 原子锁避免重复条；升级保留 vpn_compat/vpn_apps/PROXY_URL；修 PROXY_URL 追加缺换行把下一行拼坏的 bug。+ SmartDNS 48.5-RC1 + 加密上游（DoH/DoH3/DoT/DoQ/DNSCrypt）+ 按域名分流 + 卸载快照可恢复（AGH 40251 · smartdns 6080 · 上游管理 6081）
 updateJson=https://raw.githubusercontent.com/liuzq2002/Adguard-Home-For-Magisk-Mod/main/Update.json
