@@ -1,0 +1,173 @@
+# AdGuard Home + SmartDNS 合并 Magisk / KernelSU 模块
+
+一个把 **AdGuard Home（去广告 + 查询日志 + 面板）** 与 **SmartDNS（缓存 + 分流 + 最快 IP 测速）**
+串成一条链的 Android 模块，并额外提供一个自建的**加密上游桥**，让这套内置的 SmartDNS 也能用
+DoH / DoT / DoQ 上游。
+
+```
+应用 → AGH:53（nat 劫持）→ SmartDNS:6053 → dnsenc:6054 → 加密上游（DoH / DoT / DoQ）
+                              └─ 明文上游组（UDP 53）
+```
+
+- **作者**：vip-svip
+- **许可证**：见 `LICENSE.txt`（AdGuard Home 与 SmartDNS 各自的上游许可）
+- 本仓库为**私密仓库**，仅作自用存档与版本管理。
+
+---
+
+## 目录结构
+
+| 路径 | 内容 |
+|---|---|
+| `module/` | 可直接打包刷入的模块文件树（`module.prop` / `customize.sh` / `service.sh` / `bin/` / `smartdns/` / `scripts/`） |
+| `src/` | AdGuard Home 源码（基于上游 `v1.0.0-b.2` 的 DNS 层 + 自建 `cmd/dnsenc`） |
+| `tools/` | 本次改造用到的构建 / 打补丁脚本 |
+
+`module/bin/AdGuardHome`、`module/bin/dnsenc`、`module/smartdns/usr/local/lib/smartdns/smartdns`
+都是**已编译好的 arm64 二进制**，所以仓库克隆下来就能直接 zip 刷入。
+
+---
+
+## 关键组件
+
+### 1. dnsenc（加密上游桥）
+
+`module/bin/dnsenc` 是个小 Go 程序，监听 `127.0.0.1:6054`（UDP + TCP 普通 DNS），
+把查询转发给配置里的加密上游，取第一个成功答复。
+
+**为什么需要它**：本模块内置的 SmartDNS 是官方 `aarch64-linux-all` 动态版，
+**没有编译 TLS**，`server-tls` / `server-https` 写进去只会显示 Unknown、延迟恒 0。
+所以改用本地桥：SmartDNS 只把 `127.0.0.1:6054` 当成一条普通上游。
+
+配置：`module/smartdns/etc/smartdns/encrypted.conf`，一行一条：
+
+```
+doh https://223.5.5.5/dns-query
+dot 223.5.5.5
+doq dns.alidns.com
+```
+
+协议别名：`doh` / `doh3`(`h3`) / `dot`(`tls`) / `doq`(`quic`) / `dnscrypt`(`sdns`) / `udp` / `tcp`；
+裸地址默认当 DoT。也可以直接写 `https://…`、`tls://…`、`quic://…`、`sdns://…`。
+
+### 2. 按域名分流
+
+`module/smartdns/etc/smartdns/domain-rules.conf`：
+
+```
+domain-rules /google.com/ -nameserver enc
+domain-rules /example.com/ -nameserver default
+domain-rules /ads.example/ -nameserver block
+```
+
+加密组带 `-group enc -exclude-default-group`，**没被点名的域名不会多等一次 DoH 握手**。
+
+### 3. 上游管理页（:6081）
+
+`module/scripts/webui/upstream-manage.html` + CGI `cgi-bin/upstream`，由 busybox httpd 提供：
+
+- 明文上游增删（3 个实测最快的国内公共 DNS）
+- 加密上游增删 + 延迟探测 + 重启转发
+- 按域名分流规则增删
+- 清空缓存 / 重启 SmartDNS
+
+入口在 **SmartDNS 面板「上游服务器」页刷新按钮右边**（`＋ 上游服务器`），
+AdGuard Home 侧栏里没有这个入口。
+
+---
+
+## 实测延迟（设备 18e1870，每项 3 轮）
+
+### 加密上游（可用，按平均延迟排序）
+
+| 上游 | 平均 | 最慢 |
+|---|---|---|
+| `doh https://223.5.5.5/dns-query` | **105 ms** | 110 |
+| `doh https://223.6.6.6/dns-query` | 107 ms | 108 |
+| `dot 223.6.6.6` | 108 ms | 119 |
+| `dot 223.5.5.5` | 110 ms | 120 |
+| `doq dns.alidns.com` | 115 ms | 123 |
+| `doh https://dns.alidns.com/dns-query` | 134 ms | 141 |
+| `dot dns.alidns.com` | 138 ms | 157 |
+| `doh https://doh.360.cn/dns-query` | 138 ms | 145 |
+| `doh https://1.12.12.12/dns-query` | 178 ms | 240 |
+| `dot 120.53.53.53` | 183 ms | 251 |
+| `dot dot.pub` | 244 ms | 276 |
+| `doh https://doh.pub/dns-query` | 250 ms | 298 |
+
+### 不可用（已从预设里剔除）
+
+`dns.google` 6.1s · `cloudflare-dns.com` 2.5s · `1dot1dot1dot1.cloudflare-dns.com` 8.3s ·
+`dns.adguard-dns.com` DoQ 5.0s / DoT 15.9s · `dot dns.qq.com` 6.0s · `doh dns.qq.com` EOF ·
+`dot dns.360.cn` 8.1s · `dot 119.29.29.29` 3.0s · `doq 1.12.12.12` 3.0s · `dot 9.9.9.9` 3.0s ·
+`doq dot.pub` 4.0s · `doq dns.360.cn` 4.1s · `i.pdns.cn`（DoT/DoH）4.1s ·
+`dot.dnspod.cn` / `dns.dnspod.cn` 无 A 记录
+
+### 明文链路（smartdns `response-mode fastest-response`，3 条上游）
+
+| 场景 | median | p90 | max |
+|---|---|---|---|
+| 冷查 | 69.5 ms | 110.1 | 178.1 |
+| 热查 | 5.3 ms | 7.7 | 10.1 |
+
+上游数量是延迟的关键：上游越多，NXDOMAIN 类查询要等的答复越多，尾部越长。
+所以明文只保留 3 个（`223.5.5.5` / `223.6.6.6` / `119.29.29.29`），加密上游单独成组。
+
+---
+
+## 已修复的坑（都是真机复现过的）
+
+| 问题 | 原因 | 修法 |
+|---|---|---|
+| SmartDNS 面板报**「服务器请求处理已暂停，请检查是否有足够的磁盘空间」**，所有查询被丢弃 | UI 的 sqlite 库 `smartdns.db` 建在 `data-dir`，而 `data-dir` 原本是 chroot 内 tmpfs（`/tmp/smartdns`）。开机时目录不存在 → 建库失败 → `statvfs` 返回 0 → `is_process_suspended=true` | `data-dir` 改到持久目录 `/var/lib/smartdns`；`service.sh` 每次启动前建目录 + `chown 9999:9999` + `chmod 755`，老配置自动迁移；起来后查 `/api/stats/overview` 自愈；清缓存不再删 `data-dir` 本身 |
+| 卸载后整个 `/data/adb/agh` 与模块目录被清空，用户配置全丢 | `uninstall.sh` 末尾无条件 `rm -rf` 两个目录 | 卸载前把 yaml / 备份 / SmartDNS 配置 / 规则 / hosts 快照到 `/data/adb/agh-uninstalled-<时间>/`，日志写 `/data/adb/agh-uninstall.log`；重装时 `customize.sh` 自动取最新快照灌回 |
+| 模块目录会莫名消失（别的模块被牵连） | `service.sh` 发现别的模块带 `system/etc/hosts` 就 `touch "$module/remove"`，让 KernelSU 下次开机把**用户自己的**模块删掉 | 改为只记 `[WARN]`，不删除、继续启动 |
+| `service.sh` 出现多个实例，下次开机单实例锁误判「已在运行」直接退出 | `pgrep … \|\| script &` 让整条 `\|\|` 列表进了子 shell，cmdline 仍是 `sh service.sh` | 改 `start_helper()` + `setsid`；锁改 `mkdir` 原子锁 + `trap … EXIT` |
+| webui 装完永远是旧版（`ruleslist` 报「未知 action」） | `customize.sh` 只要 `$MODPATH/scripts/webui` 存在就 `cp -rf` 回盖，而那是最早的旧副本 | 每次从 zip 解 `scripts/webui/*` 到 `$AGH_DIR`，反向复制；`$MODPATH` 只作兜底 |
+| `adb push` 报 `Operation not permitted`，卸载时 `uninstall.sh` 自己被锁 | `chattr +i` 锁了全部 `*.sh` | 只锁 `action.sh`、`uninstall.sh`、`$SCRIPT_DIR/*.sh` |
+
+---
+
+## 构建
+
+```bash
+# 1. UI（AdGuard Home 面板）
+cd src/client_v2
+npm run build-prod          # 产物落 src/build/static/
+
+# 2. Go 主程序（含 UI embed，注意版本号 ldflags）
+cd src
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-s -w \
+    -X github.com/AdguardTeam/AdGuardHome/internal/version.version=20261116-v30 \
+    -X github.com/AdguardTeam/AdGuardHome/internal/version.channel=release" \
+  -o ../module/bin/AdGuardHome .
+
+# 3. 加密上游桥
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
+  -o ../module/bin/dnsenc ./cmd/dnsenc
+
+# 4. 打包（module/ 目录直接 zip）
+cd module && zip -r ../AdGuardHome-SmartDNS-Merged.zip . -x '*.DS_Store'
+```
+
+> ⚠️ 必须带 `-X …internal/version.version=…`，否则 `AdGuardHome --version` 输出为空。
+> `main.go` 是 `//go:embed build`，UI 必须先构建到 `src/build/static/` 再编 Go。
+
+---
+
+## 安装
+
+1. 把 zip 放进手机，在 KernelSU / Magisk 里刷入，或
+   ```sh
+   unzip -oq AGH.zip -d /data/adb/modules/AdGuardHome
+   ```
+2. 重启（或手动 `sh /data/adb/modules/AdGuardHome/service.sh`）
+3. 端口：AGH 面板 `40251` · SmartDNS 面板 `6080` · 上游管理 `6081`（仅 `127.0.0.1`）
+
+---
+
+## 致谢
+
+- [AdGuard Home](https://github.com/AdguardTeam/AdGuardHome) — AGPL-3.0
+- [SmartDNS](https://github.com/pymumu/smartdns) — GPL-3.0

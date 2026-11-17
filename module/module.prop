@@ -1,0 +1,7 @@
+id=AdGuardHome
+name=AdGuard Home For Android
+version=20261116-v30
+versionCode=2026111630
+author=vip-svip
+description=[v30] AdGuard Home 20261116-v30（上游入口只留在 SmartDNS「上游服务器」页刷新按钮右边，AGH 侧栏里那个入口已移除；上游管理页新增「返回」按钮；加密上游预设换成实测最快的一批 —— 阿里 DoH(IP) 105ms / DoH(IP2) 107ms / DoT(IP2) 108ms / DoT(IP) 110ms / 阿里 DoQ 115ms / 阿里 DoH(域名) 134ms / DoT(域名) 138ms / 360 DoH 138ms / DNSPod DoH 178ms / DNSPod DoT 183ms / 腾讯 DoT 244ms / 腾讯 DoH 250ms；已剔除 dns.google、Cloudflare、AdGuard、dns.qq.com 等全部超时项） + SmartDNS 48.5-RC1 + data-dir 持久化修「请求处理已暂停」 + 卸载数据快照可恢复（AGH 40251 · smartdns 6080 · 上游管理 6081）
+updateJson=https://raw.githubusercontent.com/liuzq2002/Adguard-Home-For-Magisk-Mod/main/Update.json
