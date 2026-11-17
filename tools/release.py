@@ -187,7 +187,10 @@ def main():
     version = prop.get("version", "")
     if not version:
         die("module.prop 里没有 version=")
-    tag = a.tag or ("v" + version)
+    # 版本号规则：纯日期（YYYYMMDD）。日期版本号直接作为 tag，不再加 "v" 前缀；
+    # 只有非日期形式（历史遗留的 v30 之类）才补 "v"，保证老 tag 仍能对上。
+    is_date = len(version) == 8 and version.isdigit()
+    tag = a.tag or (version if is_date else ("v" + version))
     author = prop.get("author", "")
     zip_name = "AdGuardHome-SmartDNS-Merged-%s.zip" % version
     zip_path = os.path.join(ROOT, zip_name)

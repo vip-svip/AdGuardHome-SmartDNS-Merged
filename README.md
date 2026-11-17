@@ -12,6 +12,9 @@ DoH / DoT / DoQ 上游。
 - **作者**：vip-svip
 - **许可证**：见 `LICENSE.txt`（AdGuard Home 与 SmartDNS 各自的上游许可）
 - 本仓库为**私密仓库**，仅作自用存档与版本管理。
+- **版本号规则：纯日期**（`YYYYMMDD`，如 `20261117`），不再带 `vNN` 序号。
+  `module.prop` 的 `version` 与 `versionCode` 同为一个日期整数，Release 的 tag 也是它。
+  同日多次改动按同日覆盖（重新打包 + 重新上传附件），跨日才升版本号。
 
 ---
 
@@ -125,6 +128,9 @@ AdGuard Home 侧栏里没有这个入口。
 | `service.sh` 出现多个实例，下次开机单实例锁误判「已在运行」直接退出 | `pgrep … \|\| script &` 让整条 `\|\|` 列表进了子 shell，cmdline 仍是 `sh service.sh` | 改 `start_helper()` + `setsid`；锁改 `mkdir` 原子锁 + `trap … EXIT` |
 | webui 装完永远是旧版（`ruleslist` 报「未知 action」） | `customize.sh` 只要 `$MODPATH/scripts/webui` 存在就 `cp -rf` 回盖，而那是最早的旧副本 | 每次从 zip 解 `scripts/webui/*` 到 `$AGH_DIR`，反向复制；`$MODPATH` 只作兜底 |
 | `adb push` 报 `Operation not permitted`，卸载时 `uninstall.sh` 自己被锁 | `chattr +i` 锁了全部 `*.sh` | 只锁 `action.sh`、`uninstall.sh`、`$SCRIPT_DIR/*.sh` |
+| **装了模块但 DNS 根本不走 AGH**，querylog 里只有 `127.0.0.1` 的 PTR、没有任何真实客户端 | nat 链顶部有一条 `-m owner --uid-owner 0 -j RETURN`。Android 的系统解析器 `dnsproxyd` 就跑在 `netd`（uid 0）里 → 所有 App 的查询在进 AGH 之前被豁免 | 删掉「uid 0 全豁免」，只保留 SmartDNS（uid 9999）、回环（`-o lo`）、dnsenc bootstrap 的精确豁免（root 仅 `223.5.5.5:53`）。修完后 AGH 立刻能看到真实客户端与真实域名查询 |
+| 运营商 IPv6 DNS（`2408:8888::8` 之类）绕过过滤 | 本机内核没有 `ip6tables` 的 `nat` 表（`Table does not exist`），`TPROXY` 在 `OUTPUT` 也报 `Invalid argument`，v6 的 53 端口从来没有被处理 | 新增 `v6_dns=auto\|redirect\|drop\|keep`：`auto` 先试 `modprobe ip6table_nat` 走 nat REDIRECT，没有 nat 表就退到 `mangle` 丢弃 v6:53，让系统解析器回落已被劫持的 v4（实测多花 <1ms）。v6 链同样支持 VPN 让路与 `proxy` 豁免 |
+| 规则导入超过 4MiB 被截断 / 报错 | `internal/home/middlewares.go` 给每个请求体套 `LimitReader`（默认 64KiB，`set_rules` 放宽到 4MiB） | `limitRequestBody` 直接透传；查看规则文件的上限也从 4MiB 提到 64MiB。实测 11.77MiB / 301280 条导入 HTTP 200 |
 
 ---
 
@@ -139,7 +145,7 @@ npm run build-prod          # 产物落 src/build/static/
 cd src
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath \
   -ldflags "-s -w \
-    -X github.com/AdguardTeam/AdGuardHome/internal/version.version=20261116-v30 \
+    -X github.com/AdguardTeam/AdGuardHome/internal/version.version=20261117 \
     -X github.com/AdguardTeam/AdGuardHome/internal/version.channel=release" \
   -o ../module/bin/AdGuardHome .
 
