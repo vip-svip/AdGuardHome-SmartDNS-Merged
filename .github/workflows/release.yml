@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（留空则用 module.prop 里的 version）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 读取版本号
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            V=$(grep -m1 '^version=' module/module.prop | cut -d= -f2)
+            TAG="v${V}"
+          fi
+          VERSION=$(grep -m1 '^version=' module/module.prop | cut -d= -f2)
+          VC=$(grep -m1 '^versionCode=' module/module.prop | cut -d= -f2)
+          AUTHOR=$(grep -m1 '^author=' module/module.prop | cut -d= -f2-)
+          echo "tag=$TAG"             >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"     >> "$GITHUB_OUTPUT"
+          echo "versionCode=$VC"      >> "$GITHUB_OUTPUT"
+          echo "author=$AUTHOR"       >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG VERSION=$VERSION VC=$VC AUTHOR=$AUTHOR"
+
+      - name: 校验模块文件
+        run: |
+          set -e
+          for f in module/module.prop module/service.sh module/customize.sh module/uninstall.sh \
+                   module/bin/AdGuardHome module/bin/dnsenc; do
+            if [ ! -e "$f" ]; then echo "缺少 $f"; exit 1; fi
+          done
+          echo "--- module.prop ---"
+          cat module/module.prop
+          echo "--- 脚本语法检查 ---"
+          for f in module/service.sh module/customize.sh module/uninstall.sh module/action.sh \
+                   module/scripts/*.sh module/scripts/webui/cgi-bin/upstream; do
+            [ -f "$f" ] || continue
+            sh -n "$f" && echo "  OK   $f"
+          done
+
+      - name: 打包
+        id: pack
+        run: |
+          set -e
+          NAME="AdGuardHome-SmartDNS-Merged-${{ steps.ver.outputs.version }}.zip"
+          cd module
+          # -X 去掉多余属性；排除运行期垃圾
+          zip -r -X "../$NAME" . \
+            -x '*/.DS_Store' '*/Thumbs.db' 'bin/data/*' 'rules/subscriptions/*' \
+               'smartdns/tmp/*' 'smartdns/var/*' 'smartdns/run/*' 'smartdns/proc/*' \
+               'smartdns/sys/*' 'smartdns/dev/*' '*.log'
+          cd ..
+          SIZE=$(stat -c%s "$NAME")
+          MD5=$(md5sum "$NAME" | cut -d' ' -f1)
+          SHA=$(sha256sum "$NAME" | cut -d' ' -f1)
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "md5=$MD5"   >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"   >> "$GITHUB_OUTPUT"
+          echo "打包完成: $NAME  ${SIZE}B  md5=${MD5}"
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.version }} · AdGuard Home + SmartDNS 合并模块
+          files: ${{ steps.pack.outputs.name }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            ## ${{ steps.ver.outputs.version }}
+
+            作者：${{ steps.ver.outputs.author }}
+
+            AdGuard Home + SmartDNS 合并 Magisk / KernelSU 模块（arm64）。
+
+            ### 安装
+
+            1. 下载 `${{ steps.pack.outputs.name }}`
+            2. 在 KernelSU / Magisk 里刷入，或解开到 `/data/adb/modules/AdGuardHome`
+            3. 重启设备
+            4. 端口：AdGuard Home 面板 `40251` · SmartDNS 面板 `6080` · 上游管理 `6081`（仅 `127.0.0.1`）
+
+            ### 校验
+
+            ```
+            大小    ${{ steps.pack.outputs.size }} B
+            md5     ${{ steps.pack.outputs.md5 }}
+            sha256  ${{ steps.pack.outputs.sha }}
+            ```
+
+            ### 本版变更
+
+            见提交记录：`git log --oneline $(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo HEAD~1)..HEAD`
