@@ -36,3 +36,6 @@ desktop.ini
 *.rej
 go.mod.bak
 go.sum.bak
+
+# ---- 凭据 ----
+.gh_token
