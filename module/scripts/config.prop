@@ -24,3 +24,15 @@ vpn_apps=""
 # 如果你在 AGH 网页里改过登录密码，把这里同步改掉，否则只会跳过自愈并记一条 WARN。
 agh_user=root
 agh_pass=root
+
+# ---------------------------------------------------------------
+# IPv6 的 DNS 劫持方式（很多内核没有 ip6table_nat / 也没有可用的 TPROXY）
+#   auto     默认。ip6tables 有 nat 表就用 REDIRECT 劫持；没有就退到 drop。
+#   redirect 只用 ip6tables -t nat REDIRECT（会先试 modprobe ip6table_nat）。
+#   drop     在 ip6tables -t mangle 的 AGH_V6DNS 链里丢弃 v6 的 53 端口查询，
+#            系统会自动回落到已被劫持的 v4 DNS（实测多花不到 1ms）。
+#            只有 v6、没有任何 v4 DNS 的网络里这样会解析失败，请改 keep。
+#   keep     完全不碰 v6（等于放弃 v6 的 DNS 过滤）。
+# 安全留意：drop 模式下运营商下发的 v6 DNS（如 2408:8888::8）会被挡住，
+# 那些想用 v6 DNS 绕过过滤的应用就绕不过去了。
+v6_dns=auto

@@ -1,7 +1,7 @@
 id=AdGuardHome
 name=AdGuard Home For Android
-version=20261116-v31
-versionCode=2026111631
+version=20261117
+versionCode=20261117
 author=vip-svip
-description=[v31] AdGuard Home 20261116-v31，重点：不再和 VPN 冲突。新增 vpn_compat 三种模式（6081 管理页「VPN 共存」卡片可一键切换，也可写 scripts/config.prop）：auto 默认，检测到 tun/tap/ppp/utun/wg/ipsec 隧道接口就把 DNS 劫持让路（ADGUARD 链清空成只 RETURN、从 OUTPUT 摘掉跳转），解析完全交给 VPN，断开 5 秒内自动恢复；proxy 串联共存，始终劫持但豁免隧道出流量（lo/tun+/tap+/ppp+/utun+/wg+/ipsec+）、以及 Clash/mihomo/v2ray 等 VPN 应用自身 uid 的查询，避免解析环；off 退回全量劫持。跳转从 -I 改 -A 追加到 OUTPUT 末尾，不抢代理自己的 dport 53 规则；只动自己的 ADGUARD/ADGUARD6 链。另修：config.prop 的 redir_port 与 AGH yaml dns.port 脱钩会导致 DNS 全挂，现在每次以 yaml 为准自动校正；管理页切换模式立刻重建规则（--once），重建加 mkdir 原子锁避免重复条；升级保留 vpn_compat/vpn_apps/PROXY_URL；修 PROXY_URL 追加缺换行把下一行拼坏的 bug。+ SmartDNS 48.5-RC1 + 加密上游（DoH/DoH3/DoT/DoQ/DNSCrypt）+ 按域名分流 + 卸载快照可恢复（AGH 40251 · smartdns 6080 · 上游管理 6081）
+description=[20261117] AdGuard Home 20261117 + SmartDNS 48.5-RC1。本次三件事：① 去掉导入规则的大小限制——AGH 原来把请求体卡在 64KiB（导入用户规则是 4MiB），现在完全不限，几十万条的规则表、大 client 列表都能直接导入/粘贴；查看规则文件的上限也从 4MiB 提到 64MiB。② 补上 IPv6 的 DNS 劫持：原来 ip6tables 没有 nat 表（Table does not exist）、TPROXY 在 OUTPUT 也不可用，运营商的 v6 DNS（2408:8888::8 之类）直接绕过过滤。现在 config.prop 新增 v6_dns=auto/redirect/drop/keep：auto 默认先尝试 modprobe ip6table_nat 用 nat REDIRECT，内核没有 nat 表就自动退到 mangle 丢弃 v6:53，系统解析器会回落到已被劫持的 v4 DNS（实测多花不到 1ms），规则放在自己的 AGH_V6DNS 链里、proxy 模式下同样豁免隧道出流量与 VPN 应用 uid，vpn_compat=auto 让路时 v6 一并撤掉。③ 版本号改成纯日期，不再带 v31 这种序号。④ 修掉一个更严重的旧 bug：iptables 里原本有一条「uid 0 全豁免」，而 Android 的系统解析器 dnsproxyd 就跑在 netd（uid 0）里——等于所有 App 的 DNS 查询全部绕过 AGH，装了模块也只是看着像在拦。现在改成：SmartDNS（uid 9999）豁免、回环（-o lo）豁免、dnsenc 的 bootstrap（root 只对 223.5.5.5:53）精确豁免，其余一律劫持。实测改完后 AGH 立刻能看到真实客户端（192.168.0.9）与真实域名查询，广告域名在系统解析器层面被拦（unknown host）。另有：VPN 共存三模式（auto 让路 / proxy 串联 / off）、加密上游 DoH·DoH3·DoT·DoQ·DNSCrypt、按域名分流、过滤器自愈、卸载快照可恢复（AGH 40251 · smartdns 6080 · 上游管理 6081）
 updateJson=https://raw.githubusercontent.com/liuzq2002/Adguard-Home-For-Magisk-Mod/main/Update.json

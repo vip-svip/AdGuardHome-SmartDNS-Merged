@@ -453,7 +453,7 @@ fi
 old_line=$(grep -m1 '^PROXY_URL=' "$BACKUP_DIR/config.prop") && \
 [ -n "$old_line" ] && { sed -i "/^PROXY_URL=/d" "$SCRIPT_DIR/config.prop"; printf "%s\n" "$old_line" >> "$SCRIPT_DIR/config.prop"; i18n_print "- Preserved PROXY_URL from backup" "- 已从备份恢复 PROXY_URL"; }
 # VPN 共存选择也要跟着升级保留，否则每次刷入都会被重置回 auto
-for _k in vpn_compat vpn_apps agh_user agh_pass; do
+for _k in vpn_compat vpn_apps v6_dns agh_user agh_pass; do
     [ -f "$BACKUP_DIR/config.prop" ] || break
     _kv=$(grep -m1 "^[[:space:]]*$_k=" "$BACKUP_DIR/config.prop" 2>/dev/null)
     [ -n "$_kv" ] || continue

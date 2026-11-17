@@ -142,6 +142,29 @@
     </div>
     <div class="msg" id="vpnMsg"></div>
     <div class="sub" id="vpnState" style="margin-top:6px;color:var(--dim)">读取中…</div>
+
+    <h2 style="margin-top:16px">IPv6 的 DNS <span class="badge" id="v6Badge">读取中…</span></h2>
+    <div class="sub" style="margin-bottom:8px">
+      本机内核多数没有 <code>ip6table_nat</code>（会报 <code>Table does not exist</code>），
+      <code>TPROXY</code> 在 OUTPUT 又不可用，所以运营商下发的 v6 DNS（如 <code>2408:8888::8</code>）
+      原本能绕过过滤。两种做法：<br>
+      <b>auto</b>（默认）有 nat 表就用 REDIRECT 劫持，没有就自动退到 drop。<br>
+      <b>redirect</b> 只用 ip6tables nat 的 REDIRECT（会先试 modprobe ip6table_nat）。<br>
+      <b>drop</b> 在自己的 <code>AGH_V6DNS</code>（mangle 表）链里丢弃 v6 的 53 端口查询，
+      系统会回落到已被劫持的 v4 解析（实测多花不到 1ms）；纯 v6 网络里会导致解析失败。<br>
+      <b>keep</b> 完全不碰 v6。
+    </div>
+    <div class="row">
+      <select id="v6Mode" style="flex:1;min-width:120px;height:40px;border-radius:10px;
+              border:1px solid var(--line);background:var(--bg2);color:var(--fg);padding:0 8px">
+        <option value="auto">auto · 有 nat 用 redirect，否则 drop</option>
+        <option value="redirect">redirect · 仅 ip6tables nat</option>
+        <option value="drop">drop · mangle 丢弃 v6:53</option>
+        <option value="keep">keep · 不处理 v6</option>
+      </select>
+      <button class="primary" id="btnV6Apply">应用</button>
+    </div>
+    <div class="msg" id="v6Msg"></div>
   </div>
 
   <div class="card">
@@ -562,6 +585,25 @@
     if (t) { setTimeout(function () { el.textContent = ''; }, 6000); }
   }
 
+  function v6Say(s, bad) {
+    var el = $('v6Msg');
+    if (!el) return;
+    el.textContent = s || '';
+    el.style.color = bad ? '#eab308' : 'var(--dim)';
+  }
+
+  function v6Render(r) {
+    if (!r || !r.ok) { return; }
+    var b = $('v6Badge');
+    var eff = r.v6_mode || 'auto';
+    var on = !!r.v6_hijack;
+    var nat = !!r.v6_nat;
+    if (b) {
+      b.className = 'badge ' + (on ? 'ok' : 'warn');
+      b.textContent = (on ? '已劫持 · ' : '未劫持 · ') + eff + (nat ? ' · nat' : ' · mangle');
+    }
+  }
+
   function vpnRender(r) {
     var badge = $('vpnBadge'), st = $('vpnState');
     if (!r || !r.ok) {
@@ -589,6 +631,7 @@
       if (r.note) { lines.push(r.note); }
       st.innerHTML = lines.join('<br>');
     }
+    v6Render(r);
   }
 
   function vpnLoad() {
@@ -700,6 +743,24 @@
   vpnLoad();
   if ($('btnVpnApply')) { $('btnVpnApply').onclick = vpnApply; }
   if ($('btnVpnRefresh')) { $('btnVpnRefresh').onclick = function () { vpnLoad(); }; }
+
+  if ($('btnV6Apply')) $('btnV6Apply').onclick = function () {
+    var sel = $('v6Mode');
+    var m = sel ? sel.value : 'auto';
+    var btn = $('btnV6Apply');
+    btn.disabled = true;
+    v6Say('正在应用 ' + m + ' …');
+    call('action=v6mode&mode=' + encodeURIComponent(m)).then(function (r) {
+      btn.disabled = false;
+      if (r && r.ok) {
+        v6Say('已设为 ' + m + '，实际生效 ' + (r.effective || m));
+        v6Render(r);
+        setTimeout(vpnLoad, 2500);
+      } else {
+        v6Say('设置失败：' + ((r && (r.error || r.warn)) || '未知错误'), true);
+      }
+    }).catch(function (e) { btn.disabled = false; v6Say('设置失败：' + e.message, true); });
+  };
   ruleChips();
   ruleLoad();
   $('btnRuleAdd').onclick = ruleAdd;
