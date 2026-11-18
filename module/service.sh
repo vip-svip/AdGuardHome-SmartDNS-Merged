@@ -34,6 +34,15 @@ fi
 log() { echo "$(date '+%F %T') $1" >> "$MAIN_LOG"; }
 
 # ---------------------------------------------------------------
+# 紧急开关（诊断用）：touch /data/adb/agh/.no_start 后，本脚本只记一行就退出。
+# 用来判断「开机卡住」到底是本模块的启动流程造成的，还是别的原因。
+# ---------------------------------------------------------------
+if [ -f "$AGH_DIR/.no_start" ]; then
+    log "[WARN] 检测到 $AGH_DIR/.no_start，跳过全部启动步骤（诊断模式）。"
+    exit 0
+fi
+
+# ---------------------------------------------------------------
 # 设备兼容层：不同 ROM / root 方案下外部命令的可用性差异
 #   pgrep    个别 ROM 的 toybox 里被裁掉了 → 用 /proc 兜底
 #   netstat  较新的 toybox 已移除 → 用 ss 或 /proc/net 兜底
@@ -131,6 +140,36 @@ if ! command -v setsid >/dev/null 2>&1; then
         "$@" </dev/null >/dev/null 2>&1 &
     }
 fi
+
+# ---------------------------------------------------------------
+# AGH_BOOT_ASYNC_MARK
+# 开机关键路径零负担：root 实现（ksud/magiskd）会等本脚本退出才继续
+# late_start，脚本一慢开机就卡。所以这里立刻把整套启动甩到后台，
+# 并且等 sys.boot_completed=1 之后再真正干活，避开 dexopt / 低内存高峰。
+#   .no_start         -> 只记一行，什么都不起（诊断用）
+#   service.sh --run  -> 后台真正执行的那一份
+# ---------------------------------------------------------------
+if [ "$1" != "--run" ]; then
+    log "[INFO] service.sh 转入后台执行（--run），开机关键路径不等待本脚本。"
+    setsid sh "$0" --run </dev/null >>"$AGH_DIR/agh-boot.log" 2>&1 &
+    exit 0
+fi
+
+mkdir -p "$AGH_DIR" 2>/dev/null
+
+# 等系统真正开机完成（最多 180 秒），再让系统喘 12 秒
+_w=0
+while [ "$_w" -lt 180 ]; do
+    [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ] && break
+    sleep 1
+    _w=$((_w + 1))
+done
+if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
+    log "[INFO] 已等到 sys.boot_completed=1（${_w}s），12 秒后启动 DNS 服务。"
+else
+    log "[WARN] 等待 sys.boot_completed 超时（${_w}s），仍继续启动 DNS 服务。"
+fi
+sleep 12
 
 sd_chroot_ok() {
     command -v chroot >/dev/null 2>&1 && return 0
@@ -325,6 +364,17 @@ sd_listening() {
     port_listening 6053 udp
 }
 
+# 当前是否真的有网（主路由表里有默认路由）
+# 开机早阶段、飞行模式、没连 Wi-Fi 时都没有 —— 这种时候 ping 域名必然失败，
+# 不能据此判定「DNS 坏了」而去重启 SmartDNS、清缓存。
+net_up() {
+    [ -n "$(ip route show default 2>/dev/null)" ] && return 0
+    [ -n "$(ip route show table main default 2>/dev/null)" ] && return 0
+    # 极老的 toybox 没有 "ip route show default"
+    ip route 2>/dev/null | grep -q '^default ' && return 0
+    return 1
+}
+
 start_smartdns() {
     [ -x "$SMARTDNS_BIN" ] || return 1
     smartdns_running && sd_listening && return 0
@@ -343,7 +393,7 @@ start_smartdns() {
     sd_mounts
     rm -f "$SD_DIR"/run/*.pid "$SD_DIR"/var/run/*.pid 2>/dev/null
     sd_chroot_ok || return 1
-    setsid chroot "$SD_DIR" /usr/local/lib/smartdns/smartdns >/dev/null 2>&1 &
+    setsid chroot "$SD_DIR" /usr/local/lib/smartdns/smartdns </dev/null >/dev/null 2>&1 &
     _i=0
     while [ "$_i" -lt 20 ]; do
         sleep 0.5
@@ -472,7 +522,7 @@ start_dnsenc() {
     SSL_CERT_DIR=/system/etc/security/cacerts/ setsid "$DNSENC_BIN" \
         -listen "127.0.0.1:$DNSENC_PORT" -conf "$SD_ENC" \
         -bootstrap "$DNSENC_BOOTSTRAP" \
-        >> "$AGH_DIR/dnsenc.log" 2>&1 &
+        </dev/null >> "$AGH_DIR/dnsenc.log" 2>&1 &
     _i=0
     while [ "$_i" -lt 10 ]; do
         port_listening "$DNSENC_PORT" udp && break
@@ -562,7 +612,7 @@ start_webui() {
         [ "$lang" = "zh" ] && log "未找到 busybox，上游服务器管理页不可用（可用 sd-restart.sh 手动管理）。" || log "busybox not found, upstream manager disabled."
         return 0
     fi
-    "$BB" httpd -p 127.0.0.1:6081 -h "$WEBUI_DIR" 2>/dev/null
+    "$BB" httpd -p 127.0.0.1:6081 -h "$WEBUI_DIR" </dev/null >/dev/null 2>&1
     return 0
 }
 start_webui
@@ -590,10 +640,21 @@ agh_api_user() { printf '%s' "${agh_user:-root}"; }
 agh_api_pass() { printf '%s' "${agh_pass:-root}"; }
 
 sd_health_guard() {
+    if ! net_up; then
+        [ "$lang" = "zh" ] && log "[INFO] 当前没有默认路由（未联网 / 飞行模式），跳过 DNS 健康检查。" \
+                            || log "[INFO] No default route yet (offline or airplane mode); skipping the DNS health check."
+        return 0
+    fi
     _try=0
     while [ "$_try" -lt 2 ]; do
         # 首先确认 6053 真的在听（ping 可能被 AGH 缓存骗过，端口不会说谎）
         if sd_listening && ping -c 1 -W 3 www.baidu.com >/dev/null 2>&1; then
+            return 0
+        fi
+        # 中途断网（换 Wi-Fi / 蜂窝掉线）就别再重启 SmartDNS 了
+        if ! net_up; then
+            [ "$lang" = "zh" ] && log "[INFO] DNS 健康检查期间网络断开，跳过重启。" \
+                                || log "[INFO] Network went away during the DNS health check; skipping restart."
             return 0
         fi
         _try=$((_try + 1))
@@ -618,6 +679,12 @@ sd_health_guard() {
 }
 
 agh_filter_heal() {
+
+    if ! net_up; then
+        [ "$lang" = "zh" ] && log "[INFO] 当前没有默认路由（未联网），跳过过滤器自愈，等下次联网后再补。" \
+                            || log "[INFO] No default route yet; skipping the filter self-heal until the network is back."
+        return 0
+    fi
 
     if [ "${HAVE_CURL:-1}" != "1" ]; then
         log "[WARN] 本机没有 curl，跳过过滤器自愈（请手动在 6081/80 管理页刷新）。"
@@ -732,7 +799,7 @@ start_agh_locked() {
             if [ -f "$bak" ]; then cp -f "$bak" "$BIN_DIR/AdGuardHome.yaml"; break; fi
         done
     fi
-    "$BIN_DIR/AdGuardHome" --no-check-update &
+    "$BIN_DIR/AdGuardHome" --no-check-update </dev/null >>"$AGH_DIR/agh-stdout.log" 2>&1 &
     sleep 1
     if agh_running; then
         [ "$lang" = "zh" ] && log "AdGuardHome 启动成功。" || log "AdGuardHome started successfully."
@@ -748,12 +815,18 @@ if ! agh_running; then
 fi
 
 # 端到端健康检查：解析不通就重启 SmartDNS（装/升级后首次启动的老毛病）
-sd_health_guard
+# 注意：sd_health_guard / agh_filter_heal 都要发网络请求、还会重启 SmartDNS，
+# 慢的时候能拖几十秒到几分钟。root 实现（ksud / magiskd）执行 service.sh 时
+# 会等这个脚本退出，脚本里一阻塞，开机就会被拖住。所以这两步一律丢到后台，
+# 前台只管「把进程拉起来」这件事。
+(
+    sd_health_guard
+    agh_filter_heal
+) </dev/null >>"$MAIN_LOG" 2>&1 &
 
 # 过滤器缓存为空时自动重新下载（全新安装 / 跨版本升级后必备，否则没有拦截效果）
 agh_rules_guard
 
-agh_filter_heal
 
 # ---------------------------------------------------------------
 # 启动模块附加脚本

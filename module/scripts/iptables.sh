@@ -79,6 +79,15 @@ if ! command -v pgrep >/dev/null 2>&1; then
 fi
 
 # PORT [udp|tcp] → 0 表示本机 127.0.0.1 上有人在听
+# 当前是否真的有网（主路由表里有默认路由）。开机早阶段 / 飞行模式 / 未连 Wi-Fi
+# 时没有默认路由，这时 ping 域名必然失败，不能据此重建劫持链。
+net_up() {
+    [ -n "$(ip route show default 2>/dev/null)" ] && return 0
+    [ -n "$(ip route show table main default 2>/dev/null)" ] && return 0
+    ip route 2>/dev/null | grep -q '^default ' && return 0
+    return 1
+}
+
 # PORT [udp|tcp] → 0 表示本机有人在听这个端口（含绑 0.0.0.0 / [::] 的服务）
 port_listening() {
     _port="$1"; _proto="${2:-udp}"
@@ -268,7 +277,15 @@ vpn_ifaces() {
 # 代理类的机器上一次 vpn_uids 要 9 秒（pm 单次约 0.9s），直接把管理页
 # 切模式卡到超时。现在 pm 只跑一次，结果落一个缓存文件复用。
 PM_UID_CACHE="$AGH_DIR/.pm_uids"
+# 开机早期（sys.boot_completed 还没置 1）PackageManager 可能还没就绪，
+# 这时 `pm list packages` 会卡在 binder 上等很久。而它的调用方 rebuild_rules
+# 持有 .ipt.lock，一卡就把后续所有链操作全堵住 —— 外部表现就是「开机卡在动画」。
+# 所以开机早期只用 /data/data 的属主信息（pkg_uid 的第一步），不碰 pm。
+boot_ready() {
+    [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]
+}
 pm_uid_cache() {
+    boot_ready || return 0
     _need=""
     [ -s "$PM_UID_CACHE" ] || _need=1
     # 装/卸应用会更新 packages.xml，比缓存新就让缓存失效
@@ -832,9 +849,13 @@ while true; do
     # 重建一次就恢复（换 Wi-Fi、AGH 重启、smartdns 重新绑定端口之后都可能出现）。
     # 每 12 轮（约 60 秒）探一次，连续 3 次失败（约 3 分钟）就强制重建一次，
     # 强制重建后仍不通就记 WARN 不再频繁动链（最多 10 分钟一次）。
+    # 前提是「真的有网」：没有默认路由（开机早阶段 / 飞行模式 / 未连 Wi-Fi）时
+    # ping 必然失败，这种失败不是 DNS 故障，不能拿去重建链。
     _tick=$((${_tick:-0} + 1))
     if [ $((_tick % 12)) -eq 0 ]; then
-        if ping -c 1 -W 3 www.baidu.com >/dev/null 2>&1; then
+        if ! net_up; then
+            _dnsfail=0
+        elif ping -c 1 -W 3 www.baidu.com >/dev/null 2>&1; then
             _dnsfail=0
         else
             _dnsfail=$((${_dnsfail:-0} + 1))
