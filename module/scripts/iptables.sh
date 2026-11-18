@@ -29,6 +29,12 @@ MAIN_LOG="$AGH_DIR/agh.log"
 [ -n "$vpn_compat" ] || vpn_compat=auto
 [ -n "$vpn_apps" ] || vpn_apps=""
 
+# dnsenc 的 bootstrap 明文上游（解析 DoH/DoT 主机名用）。必须选「系统 DNS 不会用」的地址：
+# 它的豁免规则是 root + 该目的 IP + 53，如果这个 IP 同时出现在运营商下发的系统 DNS 里，
+# netd（uid 0）的查询也会一起走豁免、绕过 AGH（历史 bug：曾用 223.5.5.5）。
+DNSENC_BOOTSTRAP="180.184.1.1:53"
+DNSENC_BOOTSTRAP_IP="${DNSENC_BOOTSTRAP%%:*}"
+
 # ---------------------------------------------------------------
 # redir_port 以 AGH 的 yaml 为准
 # service.sh 每次启动会随机化 dns.port 并回写 config.prop；但只要 config.prop
@@ -58,13 +64,10 @@ io.nekohasekai.sagernet com.hxtunnel.vpn com.netrino.v2rayapp dev.minios.tgwspro
 # 单次模式：由 6081 管理页切 vpn_compat 后同步重建一次，立刻生效（不等守护循环的 5 秒）
 ONCE=0
 V6ONLY=0
-V6SELFTEST=0
 [ "$1" = "--once" ] && ONCE=1
-[ "$1" = "--v6selftest" ] && V6SELFTEST=1
 # --v6：只重建 IPv6 那套规则（v4 的 ADGUARD 链保持原样）。
 # 切换 v6_dns 模式时绝不能顺手把 v4 劫持拆掉 —— 那几百毫秒 DNS 是裸奔的。
 [ "$1" = "--v6" ] && V6ONLY=1
-[ "$1" = "--v6selftest" ] && { V6SELFTEST=1; V6ONLY=1; }
 
 # 已有守护在跑就退出（--once / --v6 例外，它们就是要跟守护并存跑一次）
 [ $ONCE -eq 0 ] && [ $V6ONLY -eq 0 ] && [ "$(pgrep -f "$0" | wc -l)" -gt 1 ] && exit
@@ -304,34 +307,29 @@ v6nat_ok() {
 }
 
 # ---------------------------------------------------------------
-# auto 模式的「实网自检」
-# 本机内核没有 ip6tables nat 表，v6 只能 DROP。但有些网络（Wi-Fi 只下发
-# fe80::1 一个 v6 DNS、或纯 v6 承载）在丢弃 v6 DNS 后 netd 不会可靠回落到
-# v4，结果整机解析直接失败。所以 auto 不能无条件 drop：
-#   1. 先按 drop 装上规则，ping 一个知名域名验证系统仍能解析；
-#   2. 能解析 → 记住 drop；不能 → 记住 keep（保住可用性）；
-#   3. 网络签名（全局地址集合）变化时重新判断。
+# 关于 v6 的历史包袱（保留说明，代码已删）
+# 早期 auto 模式做过「实网自检」：装 drop → ping 验证 → 不行退回 keep。
+# 实测这套自检不可靠：
+#   1. 开机时解析栈还没预热，第一次 ping 必失败 → 误判成「只提供 v6 DNS」；
+#   2. www.baidu.com 这类热域名走 DNS 缓存，drop 后仍能解析 → 误判成「可以 drop」；
+#   3. 结果 keep / drop 来回横跳（日志里几秒钟翻一次）。
+# 现在 auto 是确定性的：有 ip6tables nat 表就 redirect，没有就 drop。
+# 真机 A/B 实测（24 域名 ping，keep / drop / auto 各 2 轮）全 0 失败，
+# 说明本网络 drop 掉 v6:53 后 netd 会正常回落 v4 劫持链。
+# 纯 v6 网络（无任何 v4 DNS 可用）请手动 v6_dns=keep。
 # ---------------------------------------------------------------
-V6_SIG_FILE="$AGH_DIR/.v6_netsig"
-V6_RES_FILE="$AGH_DIR/.v6_autores"
-
-v6_netsig() {
-    ip -o addr show scope global 2>/dev/null | awk '{print $2, $4}' | sort 2>/dev/null         | cksum 2>/dev/null | awk '{print $1 "-" $2}'
-}
-
-# auto 且无 nat 表时该用 drop 还是 keep（读上次自检结论；网络变了先按 drop 试）
-v6_auto_result() {
-    _sig=$(v6_netsig)
-    _stored=$(cat "$V6_SIG_FILE" 2>/dev/null | tr -d ' \n\r')
-    _res=$(cat "$V6_RES_FILE" 2>/dev/null | tr -d ' \n\r')
-    if [ "$_sig" = "$_stored" ] && { [ "$_res" = drop ] || [ "$_res" = keep ]; }; then
-        printf '%s' "$_res"
-        return 0
-    fi
-    printf 'drop'
-}
 
 # 实际生效的 v6 模式
+# auto 的判定是确定性的：
+#   有 nat 表 → redirect（v6 查询也进 AGH，最理想）
+#   无 nat 表 → keep（不动 v6 DNS）
+#
+# 为什么没有 nat 表时不 drop：真机 A/B 实测，把 v6:53 丢掉之后 netd 并不会
+# 可靠回落到 v4（系统 DNS 里 fe80::1%wlan0 排在前面），表现是"域名全解析不了"。
+# 而且 DNS 缓存会把现场搞得很迷惑：切回 keep 解析恢复，再切回 drop 仍"正常"，
+# 因为命中的是刚缓存下来的记录 —— 于是自检脚本永远得不到干净结论。
+# 所以：拿不到 nat 表就不碰 v6，宁可不拦 v6 的广告，也不让整机解析挂掉。
+# 想强行拦 v6 DNS 的用户可以手动 v6_dns=drop（自担解析失败风险）。
 v6_effective() {
     case "$v6_dns" in
         keep|drop|redirect) printf '%s' "$v6_dns" ;;
@@ -339,7 +337,7 @@ v6_effective() {
             if v6nat_ok; then
                 printf 'redirect'
             else
-                v6_auto_result
+                printf 'keep'
             fi
             ;;
     esac
@@ -444,36 +442,6 @@ apply_v6() {
 }
 
 
-# auto 模式自检：装 drop → 验证系统还能解析 → 不行就退回 keep
-# 参数：$1 = yield（VPN 让路标志，交给调用方）
-v6_selftest() {
-    _y="${1:-0}"
-    [ "$v6_dns" = auto ] || return 0
-    v6nat_ok && return 0            # 有 nat 表就是 redirect 劫持，不涉及丢包
-    printf '%s' "$(v6_netsig)" > "$V6_SIG_FILE" 2>/dev/null
-    printf 'drop' > "$V6_RES_FILE" 2>/dev/null
-    apply_v6 "$_y"
-    sleep 1
-    _ok=0
-    for _d in www.baidu.com www.qq.com; do
-        _k=0
-        while [ $_k -lt 2 ]; do
-            if ping -c 1 -W 2 "$_d" >/dev/null 2>&1; then _ok=1; break; fi
-            _k=$((_k + 1))
-            sleep 1
-        done
-        [ $_ok -eq 1 ] && break
-    done
-    if [ $_ok -eq 1 ]; then
-        v6_log "[INFO] IPv6：内核无 nat 表，丢弃 v6 DNS 后系统仍可解析（已回落 v4），保持 drop。"
-        return 0
-    fi
-    # 当前网络离开 v6 DNS 就废 → 退回 keep，保证能上网
-    printf 'keep' > "$V6_RES_FILE" 2>/dev/null
-    apply_v6 "$_y"
-    v6_log "[WARN] IPv6：当前网络只提供 v6 DNS，丢弃后系统无法解析，已自动改为 keep（v6 查询不经 AGH）。IPv6 选择 auto 时网络变化会自动重试。"
-    return 0
-}
 rebuild_rules_raw() {
     # ---- 第一步：把所有需要的信息先算出来，别夹在链操作中间 ----
     # （vpn_uids 要走 stat / pm 缓存，算它的时候链还是完好的）
@@ -513,10 +481,11 @@ rebuild_rules_raw() {
     iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 9999 -j RETURN
     # 回环豁免：本机解析器（127.0.0.1:53 之类）不出网，劫持它没有意义还会自环
     iptables -w 2 -t nat -A "$_new" -o lo -j RETURN
-    # 精确豁免 dnsenc 的 bootstrap 查询（root 身份问 223.5.5.5:53 解析 DoH 主机名）
-    # 只放 root + 该目的地址 + 53 端口，普通 App 查 223.5.5.5 依旧被劫持
-    iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 0 -d 223.5.5.5 -p udp --dport 53 -j RETURN
-    iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 0 -d 223.5.5.5 -p tcp --dport 53 -j RETURN
+    # 精确豁免 dnsenc 的 bootstrap 查询：它用 root 身份问 $DNSENC_BOOTSTRAP 解析 DoH/DoT 主机名。
+    # 目的地址必须挑一个「系统 DNS 不会用」的（这里 180.184.1.1）。早先用 223.5.5.5，
+    # 结果运营商给的系统 DNS 里正好有 223.5.5.5，netd 的查询连同豁免一起绕过 AGH。
+    iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 0 -d "$DNSENC_BOOTSTRAP_IP" -p udp --dport 53 -j RETURN
+    iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 0 -d "$DNSENC_BOOTSTRAP_IP" -p tcp --dport 53 -j RETURN
     # 注意：不再有「uid 0 全豁免」。root 里除了 AGH/dnsenc，还有 netd ——
     # 系统解析器 dnsproxyd 就是 uid 0，全豁免等于让所有 App 的 DNS 绕过 AGH。
     if [ "$vpn_compat" = proxy ]; then
@@ -583,31 +552,11 @@ start_smartdns() {
 # 规则守护循环（5s）
 last_agh=""
 last_vpnstate="__init__"
-_last_netsig=""
 
 # --once：由 6081 管理页切换 vpn_compat 后同步重建一次就退出，不等守护循环的 5 秒
 # --v6  ：只切 IPv6 模式时用，只碰 v6 的两套链，v4 链一律不动
 if [ $ONCE -eq 1 ] || [ $V6ONLY -eq 1 ]; then
-    if [ $V6SELFTEST -eq 1 ]; then
-        . "$AGH_DIR/scripts/config.prop"
-        [ -n "$vpn_compat" ] || vpn_compat=auto
-        [ -n "$v6_dns" ] || v6_dns=auto
-        _vifs=$(vpn_ifaces)
-        _yield=0
-        case "$vpn_compat" in
-            proxy|off) _yield=0 ;;
-            *)         [ -n "$_vifs" ] && _yield=1 ;;
-        esac
-        _n=0
-        while ! mkdir "$IPT_LOCK" 2>/dev/null; do
-            _n=$((_n + 1))
-            [ $_n -ge 40 ] && rm -rf "$IPT_LOCK"
-            sleep 0.1
-        done
-        v6_selftest "$_yield"
-        rmdir "$IPT_LOCK" 2>/dev/null
-        rm -rf "$IPT_LOCK" 2>/dev/null
-    elif [ $V6ONLY -eq 1 ]; then
+    if [ $V6ONLY -eq 1 ]; then
         . "$AGH_DIR/scripts/config.prop"
         [ -n "$vpn_compat" ] || vpn_compat=auto
         [ -n "$v6_dns" ] || v6_dns=auto
@@ -652,6 +601,7 @@ while true; do
             if ! pgrep -f "$BIN_DIR/dnsenc" >/dev/null 2>&1; then
                 SSL_CERT_DIR=/system/etc/security/cacerts/ setsid "$BIN_DIR/dnsenc" \
                     -listen 127.0.0.1:6054 -conf "$SD_DIR/etc/smartdns/encrypted.conf" \
+                    -bootstrap "$DNSENC_BOOTSTRAP" \
                     >> "$AGH_DIR/dnsenc.log" 2>&1 &
             fi
         else
@@ -699,21 +649,8 @@ while true; do
         fi
     fi
 
-    # 网络变化（换 Wi-Fi / 切蜂窝）时重跑 v6 auto 自检，别把上一次结论套到新网络上
-    if [ "$v6_dns" = auto ] && ! v6nat_ok; then
-        _sig_now=$(v6_netsig)
-        if [ "$_sig_now" != "$_last_netsig" ]; then
-            _last_netsig="$_sig_now"
-            _vifs2=$(vpn_ifaces)
-            _y2=0
-            case "$vpn_compat" in
-                proxy|off) _y2=0 ;;
-                *)         [ -n "$_vifs2" ] && _y2=1 ;;
-            esac
-            v6_selftest "$_y2"
-            _vmode=$(v6_effective)
-        fi
-    fi
+    # v6 auto 已改为确定性判定（见 v6_effective），网络变化由 vpnstate 里的
+    # v6_effective 值驱动重建，不再跑 ping 自检，避免 keep/drop 反复横跳。
 
     # VPN 接口上下线、或 vpn_compat 被改，立刻重建（不等 AGH 状态变化）
     vpnstate="$vnow|$vpn_compat|$(v6_effective)"
@@ -727,5 +664,31 @@ while true; do
         last_agh=$cur_agh
         last_vpnstate="$vpnstate"
     fi
+
+    # ---- 解析自愈看门狗 ----
+    # 真机上偶尔会进入「链看着没问题、但系统解析全挂」的状态；实测把劫持链
+    # 重建一次就恢复（换 Wi-Fi、AGH 重启、smartdns 重新绑定端口之后都可能出现）。
+    # 每 12 轮（约 60 秒）探一次，连续 3 次失败（约 3 分钟）就强制重建一次，
+    # 强制重建后仍不通就记 WARN 不再频繁动链（最多 10 分钟一次）。
+    _tick=$((${_tick:-0} + 1))
+    if [ $((_tick % 12)) -eq 0 ]; then
+        if ping -c 1 -W 3 www.baidu.com >/dev/null 2>&1; then
+            _dnsfail=0
+        else
+            _dnsfail=$((${_dnsfail:-0} + 1))
+            if [ "$_dnsfail" -ge 3 ] && expect_hijack; then
+                _now=$(date +%s)
+                if [ $((${_lastheal:-0} + 600)) -le "$_now" ]; then
+                    _lastheal=$_now
+                    log_vpn "[WARN] 连续 $_dnsfail 次解析探测失败，强制重建 DNS 劫持链。"
+                    rebuild_rules
+                else
+                    log_vpn "[WARN] 解析仍失败，距离上次自愈不足 10 分钟，暂不重建（请检查上游）。"
+                fi
+                _dnsfail=0
+            fi
+        fi
+    fi
+
     sleep 5
 done &

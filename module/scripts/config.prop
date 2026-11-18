@@ -26,13 +26,15 @@ agh_user=root
 agh_pass=root
 
 # ---------------------------------------------------------------
-# IPv6 的 DNS 劫持方式（很多内核没有 ip6table_nat / 也没有可用的 TPROXY）
-#   auto     默认。ip6tables 有 nat 表就用 REDIRECT 劫持；没有就退到 drop。
+# IPv6 的 DNS 劫持方式（很多内核没有 ip6table_nat，也没有可用的 TPROXY）
+#   auto     默认。ip6tables 有 nat 表就用 REDIRECT 劫持 v6 查询；
+#            没有 nat 表就不碰 v6（等价 keep）。
+#            真机实测：丢掉 v6:53 之后 netd 不会可靠回落 v4，
+#            表现是"域名全部解析不了"，所以默认不做这种交换。
 #   redirect 只用 ip6tables -t nat REDIRECT（会先试 modprobe ip6table_nat）。
-#   drop     在 ip6tables -t mangle 的 AGH_V6DNS 链里丢弃 v6 的 53 端口查询，
-#            系统会自动回落到已被劫持的 v4 DNS（实测多花不到 1ms）。
-#            只有 v6、没有任何 v4 DNS 的网络里这样会解析失败，请改 keep。
+#   drop     在 ip6tables -t mangle 的 AGH_V6DNS 链里丢弃 v6 的 53 端口查询。
+#            能挡住运营商 v6 DNS（如 2408:8888::8）绕过过滤，
+#            但在「系统 DNS 里 v6 排在前面」的网络上会拖垮整机解析，
+#            只在你确认本网络有可用 v4 DNS 时手动开。
 #   keep     完全不碰 v6（等于放弃 v6 的 DNS 过滤）。
-# 安全留意：drop 模式下运营商下发的 v6 DNS（如 2408:8888::8）会被挡住，
-# 那些想用 v6 DNS 绕过过滤的应用就绕不过去了。
 v6_dns=auto

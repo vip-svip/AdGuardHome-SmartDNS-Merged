@@ -77,6 +77,26 @@ domain-rules /ads.example/ -nameserver block
 入口在 **SmartDNS 面板「上游服务器」页刷新按钮右边**（`＋ 上游服务器`），
 AdGuard Home 侧栏里没有这个入口。
 
+管理页里还有三张运维卡片：
+
+- **VPN 共存**：`vpn_compat=auto|proxy|off`。`auto` 检测到隧道接口就把 v4 劫持让路给 VPN；
+  `proxy` 始终劫持，但豁免 `-o lo`、六种隧道出接口（`tun/tap/ppp/utun/wg/ipsec`）与 VPN 应用自身 uid。
+- **IPv6 DNS**：`v6_dns=auto|redirect|drop|keep`（语义见下面「已修复的坑」）。
+- **按域名分流**：直接写 `domain-rules`。
+
+---
+
+## 内置拦截列表
+
+`module/rules/拦截列表.txt`（~3.8MB / 168574 个域名，来自 StevenBlack/hosts + anti-ad easylist，
+构建脚本 `tools/build_adlist.py`）随模块一起安装，`service.sh` 的 `agh_filter_heal()` 会在启动后
+自动把它注册进 AdGuard Home。这样做是因为：远程过滤器在部分网络下长期下载不到（AGH 的过滤器
+下载走它自己的 dnsforward，和 `curl` 不是同一条路径），表现为「装了模块照样弹广告」。
+
+**必须是 AdGuard 原生 ABP 语法 `||domain^`。** 同样的域名换成 hosts 语法 `0.0.0.0 domain` 时，
+`filtering/status` 里 `rules_count` 照样显示 168574，但 `check_host` 全部 `NotFilteredNotFound`
+—— 只统计不匹配，极易误判成「已加载成功」。
+
 ---
 
 ## 实测延迟（设备 18e1870，每项 3 轮）
@@ -129,7 +149,9 @@ AdGuard Home 侧栏里没有这个入口。
 | webui 装完永远是旧版（`ruleslist` 报「未知 action」） | `customize.sh` 只要 `$MODPATH/scripts/webui` 存在就 `cp -rf` 回盖，而那是最早的旧副本 | 每次从 zip 解 `scripts/webui/*` 到 `$AGH_DIR`，反向复制；`$MODPATH` 只作兜底 |
 | `adb push` 报 `Operation not permitted`，卸载时 `uninstall.sh` 自己被锁 | `chattr +i` 锁了全部 `*.sh` | 只锁 `action.sh`、`uninstall.sh`、`$SCRIPT_DIR/*.sh` |
 | **装了模块但 DNS 根本不走 AGH**，querylog 里只有 `127.0.0.1` 的 PTR、没有任何真实客户端 | nat 链顶部有一条 `-m owner --uid-owner 0 -j RETURN`。Android 的系统解析器 `dnsproxyd` 就跑在 `netd`（uid 0）里 → 所有 App 的查询在进 AGH 之前被豁免 | 删掉「uid 0 全豁免」，只保留 SmartDNS（uid 9999）、回环（`-o lo`）、dnsenc bootstrap 的精确豁免（root 仅 `223.5.5.5:53`）。修完后 AGH 立刻能看到真实客户端与真实域名查询 |
-| 运营商 IPv6 DNS（`2408:8888::8` 之类）绕过过滤 | 本机内核没有 `ip6tables` 的 `nat` 表（`Table does not exist`），`TPROXY` 在 `OUTPUT` 也报 `Invalid argument`，v6 的 53 端口从来没有被处理 | 新增 `v6_dns=auto\|redirect\|drop\|keep`：`auto` 先试 `modprobe ip6table_nat` 走 nat REDIRECT，没有 nat 表就退到 `mangle` 丢弃 v6:53，让系统解析器回落已被劫持的 v4（实测多花 <1ms）。v6 链同样支持 VPN 让路与 `proxy` 豁免 |
+| 运营商 IPv6 DNS（`2408:8888::8` 之类）绕过过滤 | 本机内核没有 `ip6tables` 的 `nat` 表（`Table does not exist`），`TPROXY` 在 `OUTPUT` 也报 `Invalid argument`，v6 的 53 端口从来没有被处理 | 新增 `v6_dns=auto\|redirect\|drop\|keep`：`auto` 先试 `modprobe ip6table_nat` 走 nat REDIRECT；**拿不到 nat 表时保持 `keep`（不碰 v6）**，因为实测把 v6:53 丢掉之后 netd 不会可靠回落 v4（系统 DNS 里 `fe80::1%wlan0` 排在前面），整机域名全解析不了。`drop` 保留给「确认本网络有可用 v4 DNS」的用户手动开。v6 链同样支持 VPN 让路与 `proxy` 豁免 |
+| 装了模块但偶发「域名全部解析不了」，链看着完全正常 | 换 Wi-Fi / AGH 重启 / smartdns 重新绑定端口之后，偶尔会进入「劫持链在、解析全挂」的状态，重建一次链即恢复 | `iptables.sh` 守护循环加解析自愈看门狗：每 ~60s 探一次 `ping www.baidu.com`，连续 3 次失败就强制 `rebuild_rules`（最多 10 分钟一次，避免频繁动链），日志记 `[WARN] 连续 N 次解析探测失败，强制重建 DNS 劫持链。` |
+| dnsenc 的 bootstrap 豁免顺带放过了系统解析器 | bootstrap 写的是 `223.5.5.5:53`，而本机 Wi-Fi 的 `DnsAddresses` 里正好有 `223.5.5.5` —— `--uid-owner 0 -d 223.5.5.5 --dport 53 -j RETURN` 把 netd（uid 0）一起放过了，广告域名直接拿到真实 IP | bootstrap 改成 `180.184.1.1:53`（不在任何系统 DNS 列表里），`-bootstrap` 参数写进 `bin/dnsenc` 的启动命令（`service.sh` / `iptables.sh` / `sd-restart.sh` 三处），链里的豁免跟着改 |
 | 规则导入超过 4MiB 被截断 / 报错 | `internal/home/middlewares.go` 给每个请求体套 `LimitReader`（默认 64KiB，`set_rules` 放宽到 4MiB） | `limitRequestBody` 直接透传；查看规则文件的上限也从 4MiB 提到 64MiB。实测 11.77MiB / 301280 条导入 HTTP 200 |
 
 ---

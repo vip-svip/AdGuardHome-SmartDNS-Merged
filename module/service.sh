@@ -258,6 +258,9 @@ SD_ENC_SRV="$SD_DIR/etc/smartdns/enc-servers.conf"
 SD_RULES="$SD_DIR/etc/smartdns/domain-rules.conf"
 DNSENC_BIN="$BIN_DIR/dnsenc"
 DNSENC_PORT=6054
+# dnsenc 解析 DoH/DoT 主机名用的明文 bootstrap。必须挑一个「系统 DNS 不会用」的地址，
+# 否则 nat 链给它的豁免会把 netd 的查询一起放过去（系统 DNS 里出现过 223.5.5.5 就是这个坑）。
+DNSENC_BOOTSTRAP="180.184.1.1:53"
 
 dnsenc_running() { pgrep -f "$DNSENC_BIN" >/dev/null 2>&1; }
 
@@ -328,6 +331,7 @@ start_dnsenc() {
     wait_port_free "$DNSENC_PORT"
     SSL_CERT_DIR=/system/etc/security/cacerts/ setsid "$DNSENC_BIN" \
         -listen "127.0.0.1:$DNSENC_PORT" -conf "$SD_ENC" \
+        -bootstrap "$DNSENC_BOOTSTRAP" \
         >> "$AGH_DIR/dnsenc.log" 2>&1 &
     _i=0
     while [ "$_i" -lt 10 ]; do

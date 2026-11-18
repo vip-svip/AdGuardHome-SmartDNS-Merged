@@ -497,7 +497,7 @@ v6_effective_mode() {
             if v6_nat_ok; then
                 printf 'redirect'
             else
-                v6_auto_result
+                printf 'keep'
             fi
             ;;
     esac
