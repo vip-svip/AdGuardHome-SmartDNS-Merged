@@ -127,6 +127,9 @@ sd_datadir_guard() {
 }
 
 # SmartDNS 起来后确认没有因磁盘守卫被暂停；被暂停就重建目录并重启一次
+# 启动后实测 SmartDNS 能否解析；不能就清缓存重启一次（装机/升级后首次启动
+# 偶尔会带着旧缓存或旧配置起来，表现为 6053 全挂、手动 sd-restart.sh 才好）。
+
 sd_suspend_guard() {
     _bb=""
     for _c in /data/adb/ksu/bin/busybox /data/adb/magisk/busybox /system/bin/busybox; do
@@ -163,14 +166,51 @@ sd_mounts() {
     mountpoint -q "$SD_DIR/run"  || mount -t tmpfs -o mode=0777,nosuid,nodev tmpfs "$SD_DIR/run" 2>/dev/null
 }
 
+# ---------------------------------------------------------------
+# 本地规则文件守卫：yaml 里引用的 rules/*.txt 若不存在，AGH 每次启动都会报
+# chtimes .../filters/xxx.txt: no such file or directory，且该过滤器恒为 0 条。
+# 这里只补空文件，不覆盖已有内容（用户自己写规则不会丢）。
+# ---------------------------------------------------------------
+agh_rules_guard() {
+    _rd="$MODULES_DIR/AdGuardHome/rules"
+    [ -d "$_rd" ] || return 0
+    for _f in 反诈.txt 反诈类.txt NoAppDownload.txt myallow.txt; do
+        [ -f "$_rd/$_f" ] || : > "$_rd/$_f" 2>/dev/null
+    done
+    return 0
+}
+
+# 6053 是否真的在监听（进程在但没监听 = 假运行，最隐蔽的故障）
+
+sd_listening() {
+    netstat -lun 2>/dev/null | grep -q '127.0.0.1:6053 '
+}
+
 start_smartdns() {
     [ -x "$SMARTDNS_BIN" ] || return 1
-    smartdns_running && return 0
+    smartdns_running && sd_listening && return 0
+    if smartdns_running && ! sd_listening; then
+        [ "$lang" = "zh" ] && log "[WARN] SmartDNS 进程在但 6053 未监听，重启它。" \
+                            || log "[WARN] SmartDNS process alive but not listening on 6053; restarting."
+        pkill -9 -f '/usr/local/lib/smartdns/smartdns' 2>/dev/null
+        _i=0
+        while [ "$_i" -lt 24 ]; do
+            pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1 || break
+            sleep 0.25; _i=$((_i+1))
+        done
+        wait_port_free 6053
+    fi
     sd_datadir_guard
     sd_mounts
+    rm -f "$SD_DIR"/run/*.pid "$SD_DIR"/var/run/*.pid 2>/dev/null
     setsid chroot "$SD_DIR" /usr/local/lib/smartdns/smartdns >/dev/null 2>&1 &
-    sleep 1
-    if smartdns_running; then
+    _i=0
+    while [ "$_i" -lt 20 ]; do
+        sleep 0.5
+        sd_listening && break
+        _i=$((_i+1))
+    done
+    if smartdns_running && sd_listening; then
         [ "$lang" = "zh" ] && log "SmartDNS 启动成功 (chroot, :6053, UI :6080)。" || log "SmartDNS started (chroot, :6053, UI :6080)."
         return 0
     fi
@@ -310,6 +350,10 @@ sd_enc_guard
 start_dnsenc
 start_smartdns
 sd_suspend_guard
+# v6 auto 的实网自检（内核无 ip6tables nat 表时判断该 drop 还是 keep）
+if [ -f "$SCRIPT_DIR/iptables.sh" ]; then
+    sh "$SCRIPT_DIR/iptables.sh" --v6selftest >/dev/null 2>&1 &
+fi
 
 # ---------------------------------------------------------------
 # 规则目录守护：所有规则文件（内置 + 我添加的 + 网络订阅下载的）都真实存放在
@@ -385,6 +429,37 @@ start_webui
 # 这里在「所有过滤器 rules_count 全为 0」时用本地 API 触发一次刷新。
 # 凭据取 scripts/config.prop 的 agh_user / agh_pass（默认 root/root）。
 # ---------------------------------------------------------------
+# 启动后做一次端到端健康检查：系统解析 → 劫持 → AGH → SmartDNS。
+# 装机/升级后首次启动曾出现「SmartDNS 带着旧配置起来、6053 全挂」，
+# 表现为整机解析失败、手动 sd-restart.sh 才好。这里实测一次，失败就清缓存重启。
+sd_health_guard() {
+    _try=0
+    while [ "$_try" -lt 2 ]; do
+        # 首先确认 6053 真的在听（ping 可能被 AGH 缓存骗过，端口不会说谎）
+        if sd_listening && ping -c 1 -W 3 www.baidu.com >/dev/null 2>&1; then
+            return 0
+        fi
+        _try=$((_try + 1))
+        [ "$lang" = "zh" ] && log "[WARN] 启动后 DNS 解析失败（第 $_try 次），清 SmartDNS 缓存并重启。" \
+                            || log "[WARN] DNS resolution failed right after boot (try $_try); clearing SmartDNS cache and restarting."
+        pkill -9 -f '/usr/local/lib/smartdns/smartdns' 2>/dev/null
+        rm -f "$SD_DIR"/var/lib/smartdns/smartdns.db-wal \
+              "$SD_DIR"/var/lib/smartdns/smartdns.db-shm \
+              "$SD_DIR"/run/*.pid "$SD_DIR"/var/run/*.pid 2>/dev/null
+        _i=0
+        while [ "$_i" -lt 24 ]; do
+            pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1 || break
+            sleep 0.25; _i=$((_i+1))
+        done
+        wait_port_free 6053
+        start_smartdns
+        sleep 2
+    done
+    [ "$lang" = "zh" ] && log "[WARN] DNS 仍不通，请检查上游 / 网络。" \
+                        || log "[WARN] DNS still failing; check the upstreams and the network."
+    return 0
+}
+
 agh_filter_heal() {
     command -v curl >/dev/null 2>&1 || return 0
     _port=$(awk '/^http:/{f=1;next} f&&/^[^[:space:]]/{exit} f&&/^[[:space:]]*address:/{print $2;exit}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null)
@@ -405,8 +480,18 @@ agh_filter_heal() {
                            || log "[WARN] AGH API login failed (HTTP ${_lc:-none}); set agh_user/agh_pass in config.prop to enable filter self-heal."
         return 0
     fi
-    _total=$(curl -s -m 15 -b "$_ck" "http://127.0.0.1:$_port/control/filtering/status" 2>/dev/null \
-             | tr ',' '\n' | awk -F: '/rules_count/{gsub(/[^0-9]/,"",$2); s+=$2} END{print s+0}')
+    # 模块自带的拦截列表：没注册就先注册（不联网也能生效，装完立刻有拦截）
+    _st=$(curl -s -m 15 -b "$_ck" "http://127.0.0.1:$_port/control/filtering/status" 2>/dev/null)
+    _bl="$ADGPATH/rules/拦截列表.txt"
+    if [ -f "$_bl" ] && ! printf '%s' "$_st" | grep -q '拦截列表\.txt'; then
+        curl -s -m 120 -b "$_ck" -H "Content-Type: application/json" \
+             -d "{\"data\":{\"name\":\"内置拦截列表\",\"url\":\"$_bl\",\"enabled\":true},\"url\":\"$_bl\",\"whitelist\":false}" \
+             "http://127.0.0.1:$_port/control/filtering/add_url" >/dev/null 2>&1
+        [ "$lang" = "zh" ] && log "已注册模块内置拦截列表：$_bl" \
+                           || log "Registered the bundled blocklist: $_bl"
+        _st=$(curl -s -m 15 -b "$_ck" "http://127.0.0.1:$_port/control/filtering/status" 2>/dev/null)
+    fi
+    _total=$(printf '%s' "$_st" | tr ',' '\n' | awk -F: '/rules_count/{gsub(/[^0-9]/,"",$2); s+=$2} END{print s+0}')
     if [ "${_total:-0}" -eq 0 ]; then
         _ids=$(awk '/^filters:/{f=1;next} f&&/^[^[:space:]-]/{exit} f&&/^[[:space:]]+id:/{gsub(/[^0-9]/,"",$2); printf "%s,", $2}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null | sed 's/,$//')
         if [ -z "$_ids" ]; then
@@ -447,7 +532,12 @@ if ! agh_running; then
     fi
 fi
 
+# 端到端健康检查：解析不通就重启 SmartDNS（装/升级后首次启动的老毛病）
+sd_health_guard
+
 # 过滤器缓存为空时自动重新下载（全新安装 / 跨版本升级后必备，否则没有拦截效果）
+agh_rules_guard
+
 agh_filter_heal
 
 # ---------------------------------------------------------------

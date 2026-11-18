@@ -36,6 +36,9 @@ VPN_PKGS_DEFAULT="com.github.metacubex.clash.meta com.github.kr328.clash com.fol
 com.nebula.clashmi com.getsurfboard com.v2ray.ang com.v2ray.ang.fdroid \
 io.nekohasekai.sagernet com.hxtunnel.vpn com.netrino.v2rayapp dev.minios.tgwsproxy"
 
+# pm 的 uid 查询很慢（单次约 0.9s），一次会话里只跑一次，落文件复用
+PM_UID_CACHE="$AGH_DIR/.pm_uids"
+
 hdr() {
     echo "Content-Type: application/json; charset=utf-8"
     echo "Access-Control-Allow-Origin: *"
@@ -401,13 +404,28 @@ vpn_apps_raw() {
     printf '%s' "$a"
 }
 
+pm_uid_cache() {
+    _need=""
+    [ -s "$PM_UID_CACHE" ] || _need=1
+    if [ -z "$_need" ] && [ -f /data/system/packages.xml ] \
+       && [ "$PM_UID_CACHE" -ot /data/system/packages.xml ]; then
+        _need=1
+    fi
+    [ -n "$_need" ] || return 0
+    pm list packages -U 2>/dev/null \
+        | sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\).*/\1 \2/p' > "$PM_UID_CACHE" 2>/dev/null
+    [ -s "$PM_UID_CACHE" ] || rm -f "$PM_UID_CACHE" 2>/dev/null
+    return 0
+}
+
 pkg_uid() {
     _u=$(stat -c %u "/data/data/$1" 2>/dev/null)
     case "$_u" in
         ''|*[!0-9]*) ;;
         *) printf '%s' "$_u"; return 0 ;;
     esac
-    pm list packages -U 2>/dev/null | sed -n "s/^package:$1 uid:\([0-9]*\).*/\1/p" | head -1
+    pm_uid_cache
+    awk -v p="$1" '$1 == p { print $2; exit }' "$PM_UID_CACHE" 2>/dev/null
 }
 
 vpn_uids() {
@@ -418,18 +436,32 @@ vpn_uids() {
     done | sort -u | tr '\n' ' ' | sed -e 's/[[:space:]]*$//'
 }
 
+# v4 的劫持链是 A/B 轮换的（见 iptables.sh），这里必须跟着活动链走
+V4_CHAINS="ADGUARD ADGUARDB"
+active_v4() {
+    for _c in $V4_CHAINS; do
+        [ -n "$_c" ] || continue
+        iptables -w 2 -t nat -C OUTPUT -j "$_c" >/dev/null 2>&1 && { printf '%s' "$_c"; return 0; }
+    done
+    return 0
+}
+
 jump_present() {
-    iptables -w 2 -t nat -C OUTPUT -j ADGUARD >/dev/null 2>&1
+    [ -n "$(active_v4)" ]
 }
 
 agh_rule_count() {
-    n=$(iptables -w 2 -t nat -S ADGUARD 2>/dev/null | grep -c '^-A ADGUARD' 2>/dev/null)
+    _c=$(active_v4)
+    [ -n "$_c" ] || _c=ADGUARD
+    n=$(iptables -w 2 -t nat -S "$_c" 2>/dev/null | grep -c "^-A $_c" 2>/dev/null)
     [ -n "$n" ] || n=0
     printf '%s' "$n"
 }
 
 agh_redirect_count() {
-    n=$(iptables -w 2 -t nat -S ADGUARD 2>/dev/null | grep -c 'REDIRECT --to-ports' 2>/dev/null)
+    _c=$(active_v4)
+    [ -n "$_c" ] || _c=ADGUARD
+    n=$(iptables -w 2 -t nat -S "$_c" 2>/dev/null | grep -c 'REDIRECT --to-ports' 2>/dev/null)
     [ -n "$n" ] || n=0
     printf '%s' "$n"
 }
@@ -446,20 +478,36 @@ v6_nat_ok() {
     ip6tables -w 2 -t nat -L -n >/dev/null 2>&1
 }
 
+# auto 且无 nat 表时该 drop 还是 keep：读 iptables.sh 自检写下的结论
+v6_auto_result() {
+    _r=$(head -1 /data/adb/agh/.v6_autores 2>/dev/null | tr -d ' \n\r')
+    case "$_r" in
+        keep|drop) printf '%s' "$_r" ;;
+        *)         printf 'drop' ;;
+    esac
+}
+
 v6_effective_mode() {
     m=$(v6_mode_raw)
     case "$m" in
-        keep|drop|redirect) printf '%s' "$m" ;;
-        *) if v6_nat_ok; then printf 'redirect'; else printf 'drop'; fi ;;
+        keep|drop) printf '%s' "$m" ;;
+        # redirect 也依赖内核有 nat 表；没有就降级成 drop（iptables.sh 里同样降级），
+        # 这里必须如实反映，否则页面会显示「已劫持 · redirect · mangle」这种自相矛盾的状态。
+        redirect|auto|*)
+            if v6_nat_ok; then
+                printf 'redirect'
+            else
+                v6_auto_result
+            fi
+            ;;
     esac
 }
 
 v6_hijack_on() {
-    case "$(v6_effective_mode)" in
-        drop)     ip6tables -w 2 -t mangle -C OUTPUT -j AGH_V6DNS >/dev/null 2>&1 ;;
-        redirect) ip6tables -w 2 -t nat -C OUTPUT -j ADGUARD6 >/dev/null 2>&1 ;;
-        *)        return 1 ;;
-    esac
+    # 以「实际挂上的跳转」为准：只要 mangle 或 nat 任一套被 OUTPUT 引用就算生效。
+    ip6tables -w 2 -t mangle -C OUTPUT -j AGH_V6DNS >/dev/null 2>&1 && return 0
+    ip6tables -w 2 -t nat -C OUTPUT -j ADGUARD6 >/dev/null 2>&1 && return 0
+    return 1
 }
 
 emit_vpn() {
@@ -917,12 +965,13 @@ v6mode)
         [ -n "$(tail -c 1 "$CFG" 2>/dev/null)" ] && printf '\n' >> "$CFG"
         printf 'v6_dns=%s\n' "$m" >> "$CFG"
     fi
-    if [ -f "$IPT" ]; then sh "$IPT" --once >/dev/null 2>&1; fi
+    # 只重建 v6：不要用 --once，那会把 v4 的 ADGUARD 链拆掉重建，期间 DNS 裸奔
+    if [ -f "$IPT" ]; then sh "$IPT" --v6 >/dev/null 2>&1; fi
     _eff=$(v6_effective_mode)
     _on=0
     v6_hijack_on && _on=1
-    printf '{"ok":true,"mode":"%s","effective":"%s","v6_hijack":%s,"v6_nat":%s,"msg":"已写入 v6_dns=%s，实际生效 %s"}' \
-        "$(_json "$m")" "$(_json "$_eff")" \
+    printf '{"ok":true,"mode":"%s","effective":"%s","v6_mode":"%s","v6_hijack":%s,"v6_nat":%s,"msg":"已写入 v6_dns=%s，实际生效 %s"}' \
+        "$(_json "$m")" "$(_json "$_eff")" "$(_json "$_eff")" \
         "$([ "$_on" -eq 1 ] && echo true || echo false)" \
         "$(if v6_nat_ok; then echo true; else echo false; fi)" \
         "$(_json "$m")" "$(_json "$_eff")"

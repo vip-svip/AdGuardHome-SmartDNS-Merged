@@ -57,10 +57,17 @@ io.nekohasekai.sagernet com.hxtunnel.vpn com.netrino.v2rayapp dev.minios.tgwspro
 # 防止重复启动
 # 单次模式：由 6081 管理页切 vpn_compat 后同步重建一次，立刻生效（不等守护循环的 5 秒）
 ONCE=0
+V6ONLY=0
+V6SELFTEST=0
 [ "$1" = "--once" ] && ONCE=1
+[ "$1" = "--v6selftest" ] && V6SELFTEST=1
+# --v6：只重建 IPv6 那套规则（v4 的 ADGUARD 链保持原样）。
+# 切换 v6_dns 模式时绝不能顺手把 v4 劫持拆掉 —— 那几百毫秒 DNS 是裸奔的。
+[ "$1" = "--v6" ] && V6ONLY=1
+[ "$1" = "--v6selftest" ] && { V6SELFTEST=1; V6ONLY=1; }
 
-# 已有守护在跑就退出（--once 例外，它就是要跟守护并存跑一次）
-[ $ONCE -eq 0 ] && [ "$(pgrep -f "$0" | wc -l)" -gt 1 ] && exit
+# 已有守护在跑就退出（--once / --v6 例外，它们就是要跟守护并存跑一次）
+[ $ONCE -eq 0 ] && [ $V6ONLY -eq 0 ] && [ "$(pgrep -f "$0" | wc -l)" -gt 1 ] && exit
 
 # 检测Adguardhome是否存活
 agh_running() {
@@ -92,15 +99,34 @@ vpn_ifaces() {
     }'
 }
 
-# 包名 → uid（/data/data 权限位最快，查不到再问 pm）
+# 包名 → uid：先用 /data/data 的属主（最快），查不到再查 pm 缓存。
+# 注意：早期实现是「每个包都跑一次 pm list packages -U」，在装了 20+ 个
+# 代理类的机器上一次 vpn_uids 要 9 秒（pm 单次约 0.9s），直接把管理页
+# 切模式卡到超时。现在 pm 只跑一次，结果落一个缓存文件复用。
+PM_UID_CACHE="$AGH_DIR/.pm_uids"
+pm_uid_cache() {
+    _need=""
+    [ -s "$PM_UID_CACHE" ] || _need=1
+    # 装/卸应用会更新 packages.xml，比缓存新就让缓存失效
+    if [ -z "$_need" ] && [ -f /data/system/packages.xml ] \
+       && [ "$PM_UID_CACHE" -ot /data/system/packages.xml ]; then
+        _need=1
+    fi
+    [ -n "$_need" ] || return 0
+    pm list packages -U 2>/dev/null \
+        | sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\).*/\1 \2/p' > "$PM_UID_CACHE" 2>/dev/null
+    [ -s "$PM_UID_CACHE" ] || rm -f "$PM_UID_CACHE" 2>/dev/null
+    return 0
+}
+
 pkg_uid() {
     _u=$(stat -c %u "/data/data/$1" 2>/dev/null)
     case "$_u" in
         ''|*[!0-9]*) ;;
         *) printf '%s' "$_u"; return 0 ;;
     esac
-    pm list packages -U 2>/dev/null \
-        | sed -n "s/^package:$1 uid:\([0-9]*\).*/\1/p" | head -1
+    pm_uid_cache
+    awk -v p="$1" '$1 == p { print $2; exit }' "$PM_UID_CACHE" 2>/dev/null
 }
 
 vpn_uids() {
@@ -127,21 +153,94 @@ log_vpn() {
 
 # ---------------------------------------------------------------
 # 跳转管理（追加到末尾，避免抢占代理自己的规则）
+#
+# 链用 A/B 两条轮换（ADGUARD / ADGUARDB）：
+#   旧实现是 `-F ADGUARD` 再逐条 `-A`，从清空到最后一条 REDIRECT 补回
+#   之间有大约 300ms 的空窗，这期间 dport 53 会直接放行（不过 AGH、不过
+#   过滤）。改成「先在备用链里把整套规则建好，再用 -R 原子替换 OUTPUT
+#   的跳转」，切换只占一次 iptables 调用的时间，空窗为 0。
 # ---------------------------------------------------------------
+V4_CHAINS="ADGUARD ADGUARDB"
+
+# OUTPUT 当前跳到了哪条链（没有则输出空）
+# 注意：必须用 -C 精确匹配，不能拿 `-S OUTPUT` 的字符串做前缀 case ——
+# "ADGUARD" 是 "ADGUARDB" 的前缀，前缀匹配会永远返回 ADGUARD，
+# 于是把「正在用的链」当成备用链去 -F，直接造成劫持空窗。
+active_v4() {
+    for _c in $V4_CHAINS; do
+        [ -n "$_c" ] || continue
+        iptables -w 2 -t nat -C OUTPUT -j "$_c" >/dev/null 2>&1 && { printf '%s' "$_c"; return 0; }
+    done
+    return 0
+}
+
+# 当前活动链的规则条数（没有跳转时按 ADGUARD 算）
+v4_rules() {
+    _c=$(active_v4)
+    [ -n "$_c" ] || _c=ADGUARD
+    iptables -w 2 -t nat -S "$_c" 2>/dev/null | grep -c '^-A'
+}
+
 jump_present() {
-    iptables -w 2 -t nat -C OUTPUT -j ADGUARD >/dev/null 2>&1
+    [ -n "$(active_v4)" ]
+}
+
+# 把 OUTPUT 的 ADGUARD 跳转原子改到指定链；没有跳转就追加一条
+swap_jump_to() {
+    _t=$1
+    _c=$(active_v4)
+    [ "$_c" = "$_t" ] && return 0
+    if [ -n "$_c" ]; then
+        _n=$(iptables -w 2 -t nat -S OUTPUT 2>/dev/null | awk '
+            /^-A / { c++; if ($0 ~ /-j ADGUARD$/ || $0 ~ /-j ADGUARDB$/) { print c; exit } }')
+        if [ -n "$_n" ]; then
+            if iptables -w 2 -t nat -R OUTPUT "$_n" -j "$_t" 2>/dev/null; then
+                return 0
+            fi
+        fi
+        # -R 失败（规则号算错之类）：退回先删后加
+        drop_jump
+    fi
+    iptables -w 2 -t nat -A OUTPUT -j "$_t" 2>/dev/null
 }
 
 ensure_jump() {
-    jump_present && return 0
-    iptables -w 2 -t nat -A OUTPUT -j ADGUARD 2>/dev/null
+    _t=$1
+    [ -n "$_t" ] || _t=ADGUARD
+    jump_present && [ "$(active_v4)" = "$_t" ] && return 0
+    swap_jump_to "$_t"
 }
 
+# 删掉 OUTPUT 里指向我们任一链的跳转
 drop_jump() {
     _n=0
-    while [ "$_n" -lt 5 ] && jump_present; do
-        iptables -w 2 -t nat -D OUTPUT -j ADGUARD 2>/dev/null || break
+    while [ "$_n" -lt 6 ]; do
+        _hit=0
+        for _c in $V4_CHAINS; do
+            if iptables -w 2 -t nat -C OUTPUT -j "$_c" >/dev/null 2>&1; then
+                if iptables -w 2 -t nat -D OUTPUT -j "$_c" 2>/dev/null; then
+                    _hit=1
+                fi
+            fi
+        done
+        [ "$_hit" = 1 ] || break
         _n=$((_n+1))
+    done
+}
+
+# 清掉「不是 keep」的那条链（切换完成后调用，此时它已无人引用）
+drop_stale_v4() {
+    _keep=$1
+    _act=$(active_v4)
+    for _c in $V4_CHAINS; do
+        [ -z "$_c" ] && continue
+        [ "$_c" = "$_keep" ] && continue
+        # 安全阀：还在被 OUTPUT 引用就绝对不动，否则会出现
+        # 「跳转指向一条被 -F 空了的链」= 劫持看着在、其实全放行
+        [ "$_c" = "$_act" ] && continue
+        iptables -w 2 -t nat -S "$_c" >/dev/null 2>&1 || continue
+        iptables -w 2 -t nat -F "$_c" 2>/dev/null
+        iptables -w 2 -t nat -X "$_c" 2>/dev/null
     done
 }
 
@@ -204,12 +303,44 @@ v6nat_ok() {
     [ "$V6_NAT_OK" = 1 ]
 }
 
+# ---------------------------------------------------------------
+# auto 模式的「实网自检」
+# 本机内核没有 ip6tables nat 表，v6 只能 DROP。但有些网络（Wi-Fi 只下发
+# fe80::1 一个 v6 DNS、或纯 v6 承载）在丢弃 v6 DNS 后 netd 不会可靠回落到
+# v4，结果整机解析直接失败。所以 auto 不能无条件 drop：
+#   1. 先按 drop 装上规则，ping 一个知名域名验证系统仍能解析；
+#   2. 能解析 → 记住 drop；不能 → 记住 keep（保住可用性）；
+#   3. 网络签名（全局地址集合）变化时重新判断。
+# ---------------------------------------------------------------
+V6_SIG_FILE="$AGH_DIR/.v6_netsig"
+V6_RES_FILE="$AGH_DIR/.v6_autores"
+
+v6_netsig() {
+    ip -o addr show scope global 2>/dev/null | awk '{print $2, $4}' | sort 2>/dev/null         | cksum 2>/dev/null | awk '{print $1 "-" $2}'
+}
+
+# auto 且无 nat 表时该用 drop 还是 keep（读上次自检结论；网络变了先按 drop 试）
+v6_auto_result() {
+    _sig=$(v6_netsig)
+    _stored=$(cat "$V6_SIG_FILE" 2>/dev/null | tr -d ' \n\r')
+    _res=$(cat "$V6_RES_FILE" 2>/dev/null | tr -d ' \n\r')
+    if [ "$_sig" = "$_stored" ] && { [ "$_res" = drop ] || [ "$_res" = keep ]; }; then
+        printf '%s' "$_res"
+        return 0
+    fi
+    printf 'drop'
+}
+
 # 实际生效的 v6 模式
 v6_effective() {
     case "$v6_dns" in
         keep|drop|redirect) printf '%s' "$v6_dns" ;;
         *)
-            if v6nat_ok; then printf 'redirect'; else printf 'drop'; fi
+            if v6nat_ok; then
+                printf 'redirect'
+            else
+                v6_auto_result
+            fi
             ;;
     esac
 }
@@ -312,53 +443,101 @@ apply_v6() {
     # keep：什么都不做
 }
 
-rebuild_rules_raw() {
-    iptables -w 2 -t nat -L ADGUARD >/dev/null 2>&1 || iptables -w 2 -t nat -N ADGUARD
-    iptables -w 2 -t nat -F ADGUARD
 
+# auto 模式自检：装 drop → 验证系统还能解析 → 不行就退回 keep
+# 参数：$1 = yield（VPN 让路标志，交给调用方）
+v6_selftest() {
+    _y="${1:-0}"
+    [ "$v6_dns" = auto ] || return 0
+    v6nat_ok && return 0            # 有 nat 表就是 redirect 劫持，不涉及丢包
+    printf '%s' "$(v6_netsig)" > "$V6_SIG_FILE" 2>/dev/null
+    printf 'drop' > "$V6_RES_FILE" 2>/dev/null
+    apply_v6 "$_y"
+    sleep 1
+    _ok=0
+    for _d in www.baidu.com www.qq.com; do
+        _k=0
+        while [ $_k -lt 2 ]; do
+            if ping -c 1 -W 2 "$_d" >/dev/null 2>&1; then _ok=1; break; fi
+            _k=$((_k + 1))
+            sleep 1
+        done
+        [ $_ok -eq 1 ] && break
+    done
+    if [ $_ok -eq 1 ]; then
+        v6_log "[INFO] IPv6：内核无 nat 表，丢弃 v6 DNS 后系统仍可解析（已回落 v4），保持 drop。"
+        return 0
+    fi
+    # 当前网络离开 v6 DNS 就废 → 退回 keep，保证能上网
+    printf 'keep' > "$V6_RES_FILE" 2>/dev/null
+    apply_v6 "$_y"
+    v6_log "[WARN] IPv6：当前网络只提供 v6 DNS，丢弃后系统无法解析，已自动改为 keep（v6 查询不经 AGH）。IPv6 选择 auto 时网络变化会自动重试。"
+    return 0
+}
+rebuild_rules_raw() {
+    # ---- 第一步：把所有需要的信息先算出来，别夹在链操作中间 ----
+    # （vpn_uids 要走 stat / pm 缓存，算它的时候链还是完好的）
     _vifs=$(vpn_ifaces)
     _yield=0
     case "$vpn_compat" in
         proxy|off) _yield=0 ;;
         *)         [ -n "$_vifs" ] && _yield=1 ;;
     esac
+    _uids=""
+    if [ "$_yield" = 0 ] && [ "$vpn_compat" = proxy ]; then
+        _uids=$(vpn_uids)
+    fi
+
+    # ---- 第二步：在「当前没被引用」的那条链里把整套规则建好 ----
+    _cur=$(active_v4)
+    case "$_cur" in
+        ADGUARD)  _new=ADGUARDB ;;
+        ADGUARDB) _new=ADGUARD ;;
+        *)        _new=ADGUARD ;;
+    esac
+    iptables -w 2 -t nat -L "$_new" >/dev/null 2>&1 || iptables -w 2 -t nat -N "$_new"
+    iptables -w 2 -t nat -F "$_new"
 
     if [ "$_yield" = 1 ]; then
-        # 让路：链清空成只 RETURN，并且把跳转从 OUTPUT 摘掉，
+        # 让路：链里只留一条 RETURN，并且把跳转从 OUTPUT 摘掉，
         # 这样代理/VPN 自己插的 dport 53 规则可以安安静静排第一位。
-        iptables -w 2 -t nat -A ADGUARD -j RETURN
+        iptables -w 2 -t nat -A "$_new" -j RETURN
         drop_jump
+        drop_stale_v4 "$_new"
         log_vpn "[INFO] 检测到 VPN 接口($_vifs)，DNS 劫持已让路（vpn_compat=auto），解析交给 VPN 自己处理"
         apply_v6 1
         return 0
     fi
 
     # uid 9999 (SmartDNS) 豁免：它的明文上游查询要直出，不能被自己劫持
-    iptables -w 2 -t nat -A ADGUARD -m owner --uid-owner 9999 -j RETURN
+    iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 9999 -j RETURN
     # 回环豁免：本机解析器（127.0.0.1:53 之类）不出网，劫持它没有意义还会自环
-    iptables -w 2 -t nat -A ADGUARD -o lo -j RETURN
+    iptables -w 2 -t nat -A "$_new" -o lo -j RETURN
     # 精确豁免 dnsenc 的 bootstrap 查询（root 身份问 223.5.5.5:53 解析 DoH 主机名）
     # 只放 root + 该目的地址 + 53 端口，普通 App 查 223.5.5.5 依旧被劫持
-    iptables -w 2 -t nat -A ADGUARD -m owner --uid-owner 0 -d 223.5.5.5 -p udp --dport 53 -j RETURN
-    iptables -w 2 -t nat -A ADGUARD -m owner --uid-owner 0 -d 223.5.5.5 -p tcp --dport 53 -j RETURN
+    iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 0 -d 223.5.5.5 -p udp --dport 53 -j RETURN
+    iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 0 -d 223.5.5.5 -p tcp --dport 53 -j RETURN
     # 注意：不再有「uid 0 全豁免」。root 里除了 AGH/dnsenc，还有 netd ——
     # 系统解析器 dnsproxyd 就是 uid 0，全豁免等于让所有 App 的 DNS 绕过 AGH。
     if [ "$vpn_compat" = proxy ]; then
         # 出接口是隧道的查询属于 VPN 自己，抢了会成环 / 打乱 fake-ip
         for _o in tun tap ppp utun wg ipsec; do
-            iptables -w 2 -t nat -A ADGUARD -o "${_o}+" -j RETURN 2>/dev/null
+            iptables -w 2 -t nat -A "$_new" -o "${_o}+" -j RETURN 2>/dev/null
         done
-        for _u in $(vpn_uids); do
-            iptables -w 2 -t nat -A ADGUARD -m owner --uid-owner "$_u" -j RETURN 2>/dev/null
+        for _u in $_uids; do
+            iptables -w 2 -t nat -A "$_new" -m owner --uid-owner "$_u" -j RETURN 2>/dev/null
         done
         log_vpn "[INFO] vpn_compat=proxy：保留 DNS 劫持，已豁免隧道出流量${_vifs:+（当前 $_vifs）}与 VPN 应用自身的查询"
     else
         log_vpn "[INFO] vpn_compat=$vpn_compat：DNS 劫持已生效（未检测到 VPN 接口）"
     fi
 
-    iptables -w 2 -t nat -A ADGUARD -p udp --dport 53 -j REDIRECT --to-ports "$redir_port"
-    iptables -w 2 -t nat -A ADGUARD -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port"
-    ensure_jump
+    iptables -w 2 -t nat -A "$_new" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port"
+    iptables -w 2 -t nat -A "$_new" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port"
+
+    # ---- 第三步：原子切跳转，然后收掉旧链 ----
+    swap_jump_to "$_new"
+    drop_stale_v4 "$_new"
 
     apply_v6 0
     # REDIRECT 规则即时生效，不需要开关飞行模式刷新网络。
@@ -404,10 +583,53 @@ start_smartdns() {
 # 规则守护循环（5s）
 last_agh=""
 last_vpnstate="__init__"
+_last_netsig=""
 
 # --once：由 6081 管理页切换 vpn_compat 后同步重建一次就退出，不等守护循环的 5 秒
-if [ $ONCE -eq 1 ]; then
-    rebuild_rules
+# --v6  ：只切 IPv6 模式时用，只碰 v6 的两套链，v4 链一律不动
+if [ $ONCE -eq 1 ] || [ $V6ONLY -eq 1 ]; then
+    if [ $V6SELFTEST -eq 1 ]; then
+        . "$AGH_DIR/scripts/config.prop"
+        [ -n "$vpn_compat" ] || vpn_compat=auto
+        [ -n "$v6_dns" ] || v6_dns=auto
+        _vifs=$(vpn_ifaces)
+        _yield=0
+        case "$vpn_compat" in
+            proxy|off) _yield=0 ;;
+            *)         [ -n "$_vifs" ] && _yield=1 ;;
+        esac
+        _n=0
+        while ! mkdir "$IPT_LOCK" 2>/dev/null; do
+            _n=$((_n + 1))
+            [ $_n -ge 40 ] && rm -rf "$IPT_LOCK"
+            sleep 0.1
+        done
+        v6_selftest "$_yield"
+        rmdir "$IPT_LOCK" 2>/dev/null
+        rm -rf "$IPT_LOCK" 2>/dev/null
+    elif [ $V6ONLY -eq 1 ]; then
+        . "$AGH_DIR/scripts/config.prop"
+        [ -n "$vpn_compat" ] || vpn_compat=auto
+        [ -n "$v6_dns" ] || v6_dns=auto
+        _vifs=$(vpn_ifaces)
+        _yield=0
+        case "$vpn_compat" in
+            proxy|off) _yield=0 ;;
+            *)         [ -n "$_vifs" ] && _yield=1 ;;
+        esac
+        # 和 rebuild 共用同一把锁，避免与守护循环的 v6 重建交错
+        _n=0
+        while ! mkdir "$IPT_LOCK" 2>/dev/null; do
+            _n=$((_n + 1))
+            [ $_n -ge 40 ] && rm -rf "$IPT_LOCK"
+            sleep 0.1
+        done
+        apply_v6 "$_yield"
+        rmdir "$IPT_LOCK" 2>/dev/null
+        rm -rf "$IPT_LOCK" 2>/dev/null
+    else
+        rebuild_rules
+    fi
     exit 0
 fi
 
@@ -446,18 +668,21 @@ while true; do
     fi
 
     # ---- 规则体检（按当前 VPN 状态判断「应该有什么」）----
+    # 链是 A/B 轮换的，体检必须看「当前活动的那一条」
     need_fix=0
     vnow=$(vpn_ifaces)
+    V4C=$(active_v4)
+    [ -n "$V4C" ] || V4C=ADGUARD
     if expect_hijack; then
         jump_present || need_fix=1
-        iptables -w 2 -t nat -C ADGUARD -m owner --uid-owner 9999 -j RETURN 2>/dev/null || need_fix=1
-        iptables -w 2 -t nat -C ADGUARD -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
-        iptables -w 2 -t nat -C ADGUARD -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
+        iptables -w 2 -t nat -C "$V4C" -m owner --uid-owner 9999 -j RETURN 2>/dev/null || need_fix=1
+        iptables -w 2 -t nat -C "$V4C" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
+        iptables -w 2 -t nat -C "$V4C" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
     else
         # 已让路：跳转和 REDIRECT 都不该在
         jump_present && need_fix=1
-        iptables -w 2 -t nat -C ADGUARD -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
-        iptables -w 2 -t nat -C ADGUARD -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
+        iptables -w 2 -t nat -C "$V4C" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
+        iptables -w 2 -t nat -C "$V4C" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
     fi
     _vmode=$(v6_effective)
     if [ "$_vmode" = drop ]; then
@@ -471,6 +696,22 @@ while true; do
             ip6tables -w 2 -t nat -C "$ADG6_CHAIN" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
         else
             ip6tables -w 2 -t nat -C "$ADG6_CHAIN" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
+        fi
+    fi
+
+    # 网络变化（换 Wi-Fi / 切蜂窝）时重跑 v6 auto 自检，别把上一次结论套到新网络上
+    if [ "$v6_dns" = auto ] && ! v6nat_ok; then
+        _sig_now=$(v6_netsig)
+        if [ "$_sig_now" != "$_last_netsig" ]; then
+            _last_netsig="$_sig_now"
+            _vifs2=$(vpn_ifaces)
+            _y2=0
+            case "$vpn_compat" in
+                proxy|off) _y2=0 ;;
+                *)         [ -n "$_vifs2" ] && _y2=1 ;;
+            esac
+            v6_selftest "$_y2"
+            _vmode=$(v6_effective)
         fi
     fi
 

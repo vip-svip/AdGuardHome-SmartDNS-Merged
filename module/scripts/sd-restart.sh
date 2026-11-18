@@ -74,12 +74,47 @@ if [ "$encn" -gt 0 ] && [ -x "$AGH_DIR/bin/dnsenc" ]; then
     done
 fi
 
-pkill -f '/usr/local/lib/smartdns/smartdns' 2>/dev/null
-# 等守护拉起（守护循环 5s 一次）
+# ---------------------------------------------------------------
+# 停 SmartDNS：必须等「进程退出 + 6053 真正释放」。
+# 之前只看进程在不在，进程被杀后守护立刻用旧端口启动会 bind 失败，但进程还活着，
+# 于是变成「进程在、6053 没人听」的假运行状态 —— 全机 DNS 直接挂掉。
+# ---------------------------------------------------------------
+stop_smartdns() {
+    pkill -9 -f '/usr/local/lib/smartdns/smartdns' 2>/dev/null
+    _i=0
+    while [ "$_i" -lt 24 ]; do
+        pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1 || break
+        sleep 0.25; _i=$((_i+1))
+    done
+    wait_port_free 6053
+    # 残留 pid 文件会让新实例以为「已在运行」而直接退出
+    rm -f "$SD"/run/*.pid "$SD"/var/run/*.pid 2>/dev/null
+}
+
+sd_listening() {
+    netstat -lun 2>/dev/null | grep -q '127.0.0.1:6053 '
+}
+
+start_sd() {
+    setsid chroot "$SD" /usr/local/lib/smartdns/smartdns >/dev/null 2>&1 &
+    _i=0
+    while [ "$_i" -lt 20 ]; do
+        sleep 0.5
+        sd_listening && return 0
+        _i=$((_i+1))
+    done
+    return 1
+}
+
+LOG="$AGH_DIR/agh.log"
+sd_log() { echo "$(date '+%F %T') $1" >> "$LOG"; }
+
+stop_smartdns
+# 等守护拉起（守护循环 5s 一次）；判据是「端口在听」，不是「进程在」
 i=0
-while [ $i -lt 7 ]; do
+while [ $i -lt 8 ]; do
     sleep 1
-    if pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1; then
+    if sd_listening; then
         exit 0
     fi
     i=$((i+1))
@@ -99,5 +134,10 @@ mountpoint -q "$SD/proc" || mount --bind /proc "$SD/proc" 2>/dev/null
 mountpoint -q "$SD/sys"  || mount --bind /sys  "$SD/sys"  2>/dev/null
 mountpoint -q "$SD/tmp"  || mount -t tmpfs -o mode=0777,nosuid,nodev tmpfs "$SD/tmp" 2>/dev/null
 mountpoint -q "$SD/run"  || mount -t tmpfs -o mode=0777,nosuid,nodev tmpfs "$SD/run" 2>/dev/null
-setsid chroot "$SD" /usr/local/lib/smartdns/smartdns >/dev/null 2>&1 &
-exit 0
+pkill -9 -f '/usr/local/lib/smartdns/smartdns' 2>/dev/null
+rm -f "$SD"/run/*.pid "$SD"/var/run/*.pid 2>/dev/null
+if start_sd; then
+    exit 0
+fi
+sd_log "[WARN] SmartDNS 启动后 6053 仍未监听（bind 失败？），请检查 $CONF。"
+exit 1

@@ -208,7 +208,11 @@
 
 <script>
 (function () {
-  var API = 'http://127.0.0.1:6081/cgi-bin/upstream';
+  // 同源优先：从 6081 直接打开（或端口转发）时走相对路径，避免写死端口。
+  // 只有从 SmartDNS 的 6080 wwwroot 打开时才回退到绝对地址。
+  var API = (location.protocol === 'http:' && location.port !== '6080')
+    ? (location.origin + '/cgi-bin/upstream')
+    : 'http://127.0.0.1:6081/cgi-bin/upstream';
   var $ = function (id) { return document.getElementById(id); };
 
   // 返回：优先 history.back（从 SmartDNS 上游服务器页点进来时最自然），
@@ -595,7 +599,7 @@
   function v6Render(r) {
     if (!r || !r.ok) { return; }
     var b = $('v6Badge');
-    var eff = r.v6_mode || 'auto';
+    var eff = r.v6_mode || r.effective || 'auto';
     var on = !!r.v6_hijack;
     var nat = !!r.v6_nat;
     if (b) {
