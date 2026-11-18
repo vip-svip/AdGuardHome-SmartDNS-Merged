@@ -190,6 +190,74 @@ cd module && zip -r ../AdGuardHome-SmartDNS-Merged.zip . -x '*.DS_Store'
 
 ---
 
+## 开机为什么不卡（`service.sh` 异步分派）
+
+root 实现（ksud / magiskd）执行模块 `service.sh` 时，会**一直等到脚本退出**才继续走 `late_start`。所以脚本里任何同步的慢步骤，都会把 `sys.boot_completed` 永远卡在 0 —— 表现就是开机动画转个不停。
+
+原来这里有三个坑：
+
+| 慢步骤 | 最坏耗时 | 后果 |
+|---|---|---|
+| `agh_filter_heal` 的过滤器 refresh | `curl -m 180` × 3 次重试 ≈ **9 分钟** | 直接卡死 |
+| `sd_health_guard` 重启 smartdns | 两轮 pkill + 等进程退出 + 等端口释放 ≈ 几十秒 | 叠加卡顿 |
+| `iptables.sh` 里的 `pm list packages` | PMS 未就绪时 binder 长期不回；调用方还持有 `.ipt.lock` | 后续链操作全部排队 |
+
+现在改成：
+
+```sh
+# 开机关键路径 0 秒退出，真正的活在 setsid 出来的 --run 进程里
+if [ "$1" != "--run" ]; then
+    log "[INFO] service.sh 转入后台执行（--run），开机关键路径不等待本脚本。"
+    setsid sh "$0" --run </dev/null >>"$AGH_DIR/agh-boot.log" 2>&1 &
+    exit 0
+fi
+
+# --run：先等系统真正开机完成（最多 180 秒），再让系统喘 12 秒
+_w=0
+while [ "$_w" -lt 180 ]; do
+    [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ] && break
+    sleep 1
+    _w=$((_w + 1))
+done
+sleep 12
+```
+
+配套的三条：
+
+- `iptables.sh` 的 `pkg_uid_cache()` 第一行 `boot_ready || return 0`，开机没完成就不碰 `pm`，uid 缓存等下一轮守护循环再补；
+- 所有常驻进程（`AdGuardHome` / `smartdns` / `dnsenc` / `busybox httpd`）显式 `</dev/null` 重定向 stdin，绝不继承启动器的管道；
+- 异步分派块必须放在 `setsid` / `dirname` / `basename` 的兜底函数**之后**，否则缺 `setsid` 的 ROM 上会 `command not found`。
+
+这样 AGH 解析 19 万条规则（约 100MB 内存）、smartdns 起 chroot 全部落在 dexopt / zram 高峰之后，不再和系统抢内存。
+
+实测（Redmi sky2 / MIUI 14 / Android 13 / 3GB）：**冷启动 62 秒**完成，模块 enable、无 `.no_start`：
+
+```
+06:29:53 [INFO] service.sh 转入后台执行（--run），开机关键路径不等待本脚本。
+06:30:33 [INFO] 已等到 sys.boot_completed=1（39s），12 秒后启动 DNS 服务。
+06:30:47 加密上游转发生效（1 条 → 127.0.0.1:6054）。
+06:30:48 SmartDNS 启动成功 (chroot, :6053, UI :6080)。
+06:30:50 AdGuardHome 启动成功。
+```
+
+### 万一还是卡住了
+
+不用长按电源，`adb shell` 两条命令就能救：
+
+```sh
+su -c 'setprop service.bootanim.exit 1'   # 停开机动画
+su -c 'wm dismiss-keyguard'                 # 拉起 Launcher，用户态转 RUNNING_UNLOCKED
+```
+
+还起不来再 `touch /data/adb/modules/AdGuardHome/disable` 重启 —— 模块禁用即正常启动，不会影响系统本身。
+
+诊断开关：`touch /data/adb/agh/.no_start` 之后 `service.sh` 只记一行 WARN 就退出，什么都不起，方便二分定位。
+
+> ⚠️ netd 的 `iptables-restore --noflush -w -v` 常驻 `pipe_read` 是**正常设计**：它的写端就在 netd 自己的 fd 上，杀掉会立刻重新 fork 一个。不是死锁，不要动它。
+> 低端机 `sys.boot_completed` 卡住的常见真凶是 OOM + zram 晚挂（实测 uptime 108s 才 `swapon`）+ dexopt，`logcat -b crash` 里那条 init 的 SIGABRT 只是伴生现象（此时所有 service 都还在 running）。
+
+---
+
 ## 安装
 
 1. 把 zip 放进手机，在 KernelSU / Magisk 里刷入，或
