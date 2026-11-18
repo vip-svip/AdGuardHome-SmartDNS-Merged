@@ -1,6 +1,18 @@
 #!/system/bin/sh
 SCRIPT_DIR="/data/adb/agh/scripts"
 ADGPATH="/data/adb/modules/AdGuardHome"
+
+# ---------------------------------------------------------------
+# CPU 架构守卫：模块自带的是 arm64 静态二进制。32 位设备上一跑就是
+# "Exec format error"，日志里很难看出原因，所以启动前先判一次并写清楚。
+# ---------------------------------------------------------------
+ARCH_OK=1
+case "$(getprop ro.product.cpu.abi 2>/dev/null)" in
+    arm64*|aarch64*) ARCH_OK=1 ;;
+    x86*|i386*|i686*) ARCH_OK=0 ;;
+    armeabi*|arm*) ARCH_OK=0 ;;
+    *) case "$(uname -m 2>/dev/null)" in aarch64|arm64) ARCH_OK=1 ;; *) ARCH_OK=0 ;; esac ;;
+esac
 AGH_DIR="/data/adb/agh"
 BIN_DIR="$AGH_DIR/bin"
 MAIN_LOG="$AGH_DIR/agh.log"
@@ -14,7 +26,124 @@ RULES_DIR="$ADGPATH/rules"
 SUBS_DIR="$RULES_DIR/subscriptions"
 WEBUI_DIR="$SCRIPT_DIR/webui"
 
+if ! command -v curl >/dev/null 2>&1; then
+    HAVE_CURL=0
+else
+    HAVE_CURL=1
+fi
 log() { echo "$(date '+%F %T') $1" >> "$MAIN_LOG"; }
+
+# ---------------------------------------------------------------
+# 设备兼容层：不同 ROM / root 方案下外部命令的可用性差异
+#   pgrep    个别 ROM 的 toybox 里被裁掉了 → 用 /proc 兜底
+#   netstat  较新的 toybox 已移除 → 用 ss 或 /proc/net 兜底
+#   curl     Android 10+ 一般自带；缺失时相关自愈功能降级
+# ---------------------------------------------------------------
+if ! command -v pgrep >/dev/null 2>&1; then
+    pgrep() {
+        _m="$1"; shift
+        case "$_m" in
+            -P) _pp="$1"
+                for _d in /proc/[0-9]*; do
+                    _st=$(cat "$_d/stat" 2>/dev/null) || continue
+                    _ppid=$(printf '%s' "$_st" | awk '{print $4}')
+                    [ "$_ppid" = "$_pp" ] && echo "${_d#/proc/}"
+                done ;;
+            -f) for _d in /proc/[0-9]*; do
+                    [ -r "$_d/cmdline" ] || continue
+                    tr '\0' ' ' < "$_d/cmdline" 2>/dev/null | grep -q -- "$1" && echo "${_d#/proc/}"
+                done ;;
+            *)  for _d in /proc/[0-9]*; do
+                    [ "$(cat "$_d/comm" 2>/dev/null)" = "$1" ] && echo "${_d#/proc/}"
+                done ;;
+        esac
+    }
+fi
+
+# PORT [udp|tcp] → 0 表示本机 127.0.0.1 上有人在听
+# PORT [udp|tcp] → 0 表示本机有人在听这个端口（含绑 0.0.0.0 / [::] 的服务）
+port_listening() {
+    _port="$1"; _proto="${2:-udp}"
+    if command -v netstat >/dev/null 2>&1; then
+        case "$_proto" in
+            udp) netstat -lun 2>/dev/null | grep -qE "(^|[^0-9.])($_port) " && return 0 ;;
+            *)   netstat -ltn 2>/dev/null | grep -qE "(^|[^0-9.])($_port) " && return 0 ;;
+        esac
+        return 1
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        case "$_proto" in
+            udp) ss -lun 2>/dev/null | grep -q "[:.]$_port " && return 0 ;;
+            *)   ss -ltn 2>/dev/null | grep -q "[:.]$_port " && return 0 ;;
+        esac
+        return 1
+    fi
+    # 最后兜底：直接读 /proc/net（端口是十六进制；绑 0.0.0.0 或 [::] 也算在听）
+    _hex=$(printf '%04X' "$_port")
+    case "$_proto" in
+        udp) _fl="/proc/net/udp /proc/net/udp6" ;;
+        *)   _fl="/proc/net/tcp /proc/net/tcp6" ;;
+    esac
+    for _f1 in $_fl; do
+        [ -r "$_f1" ] || continue
+        awk -v h=":$_hex" -v want="$_proto" '
+            NR > 1 {
+                split($2, a, ":")
+                if (":" a[2] != h) next
+                # 本地地址：127.0.0.1 / 0.0.0.0 / :: 都算可达
+                ip = toupper(a[1])
+                if (ip != "0100007F" && ip !~ /^0+$/ && ip !~ /0{16}FFFF0100007F$/) next
+                if (want == "udp") { if ($4 == "07") found = 1 }
+                else               { if ($4 == "0A") found = 1 }
+            }
+            END { exit(found ? 0 : 1) }' "$_f1" && return 0
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------
+# 设备兼容层（第二批）：
+#   mountpoint  部分老 toybox 没有 → 用 /proc/mounts 兜底
+#   setsid      极少数 ROM 裁掉 → 退回 nohup + &
+#   chroot      缺失时给出明确报错，而不是静默不启动 SmartDNS
+# ---------------------------------------------------------------
+if ! command -v mountpoint >/dev/null 2>&1; then
+    mountpoint() {
+        _q=""
+        [ "$1" = "-q" ] && { _q=1; shift; }
+        grep -qs " $1 " /proc/mounts
+    }
+fi
+
+if ! command -v dirname >/dev/null 2>&1; then
+    dirname() { printf '%s\n' "${1%/*}"; }
+fi
+if ! command -v basename >/dev/null 2>&1; then
+    basename() {
+        _s="${1%/}"
+        printf '%s\n' "${_s##*/}"
+    }
+fi
+
+if ! command -v setsid >/dev/null 2>&1; then
+    setsid() {
+        # 没有 setsid：直接后台（不依赖 nohup —— 少数 ROM 两个都没有）
+        "$@" </dev/null >/dev/null 2>&1 &
+    }
+fi
+
+sd_chroot_ok() {
+    command -v chroot >/dev/null 2>&1 && return 0
+    log "[ERROR] 本机没有 chroot 命令，SmartDNS 无法在容器内运行；请改用其他机型或内置的替代上游。"
+    return 1
+}
+
+# 系统时区（AGH 没设 TZ 会把日志全写成 UTC）
+if [ -z "$TZ" ]; then
+    TZ=$(getprop persist.sys.timezone 2>/dev/null)
+    [ -n "$TZ" ] || TZ=Asia/Shanghai
+    export TZ
+fi
 
 # ---------------------------------------------------------------
 # 单实例保护：必须用原子操作（mkdir），不能用 pid 文件判重 ——
@@ -131,12 +260,22 @@ sd_datadir_guard() {
 # 偶尔会带着旧缓存或旧配置起来，表现为 6053 全挂、手动 sd-restart.sh 才好）。
 
 sd_suspend_guard() {
+
+    if [ "${HAVE_CURL:-1}" != "1" ]; then
+        log "[WARN] 本机没有 curl，跳过 SmartDNS 挂起自检（请打开 6080 面板确认磁盘空间）。"
+        return 0
+    fi
     _bb=""
     for _c in /data/adb/ksu/bin/busybox /data/adb/magisk/busybox /system/bin/busybox; do
         [ -x "$_c" ] && { _bb="$_c"; break; }
     done
     [ -n "$_bb" ] || return 0
-    _tok=$("$_bb" wget -qO- --post-data='{"username":"root","password":"root"}'         --header='Content-Type: application/json' http://127.0.0.1:6080/api/auth/login 2>/dev/null         | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+    _su=$(sed -n 's/^[[:space:]]*sd_user=//p' "$SCRIPT_DIR/config.prop" 2>/dev/null | head -1)
+    _sp=$(sed -n 's/^[[:space:]]*sd_pass=//p' "$SCRIPT_DIR/config.prop" 2>/dev/null | head -1)
+    [ -n "$_su" ] || _su=root
+    [ -n "$_sp" ] || _sp=root
+    _json=$(printf '{"username":"%s","password":"%s"}' "$_su" "$_sp")
+    _tok=$("$_bb" wget -qO- --post-data="$_json" --header='Content-Type: application/json' http://127.0.0.1:6080/api/auth/login 2>/dev/null | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
     [ -n "$_tok" ] || return 0
     _ov=$("$_bb" wget -qO- --header="Authorization: Bearer $_tok" http://127.0.0.1:6080/api/stats/overview 2>/dev/null)
     case "$_ov" in
@@ -183,7 +322,7 @@ agh_rules_guard() {
 # 6053 是否真的在监听（进程在但没监听 = 假运行，最隐蔽的故障）
 
 sd_listening() {
-    netstat -lun 2>/dev/null | grep -q '127.0.0.1:6053 '
+    port_listening 6053 udp
 }
 
 start_smartdns() {
@@ -203,6 +342,7 @@ start_smartdns() {
     sd_datadir_guard
     sd_mounts
     rm -f "$SD_DIR"/run/*.pid "$SD_DIR"/var/run/*.pid 2>/dev/null
+    sd_chroot_ok || return 1
     setsid chroot "$SD_DIR" /usr/local/lib/smartdns/smartdns >/dev/null 2>&1 &
     _i=0
     while [ "$_i" -lt 20 ]; do
@@ -268,7 +408,7 @@ dnsenc_running() { pgrep -f "$DNSENC_BIN" >/dev/null 2>&1; }
 wait_port_free() {
     _p="$1"; _i=0
     while [ "$_i" -lt 12 ]; do
-        if ! netstat -lun 2>/dev/null | grep -q "127.0.0.1:$_p "; then
+        if ! port_listening "$_p" udp; then
             return 0
         fi
         sleep 0.5; _i=$((_i+1))
@@ -335,7 +475,7 @@ start_dnsenc() {
         >> "$AGH_DIR/dnsenc.log" 2>&1 &
     _i=0
     while [ "$_i" -lt 10 ]; do
-        netstat -lun 2>/dev/null | grep -q "127.0.0.1:$DNSENC_PORT " && break
+        port_listening "$DNSENC_PORT" udp && break
         sleep 0.5; _i=$((_i+1))
     done
     if dnsenc_running; then
@@ -436,6 +576,19 @@ start_webui
 # 启动后做一次端到端健康检查：系统解析 → 劫持 → AGH → SmartDNS。
 # 装机/升级后首次启动曾出现「SmartDNS 带着旧配置起来、6053 全挂」，
 # 表现为整机解析失败、手动 sd-restart.sh 才好。这里实测一次，失败就清缓存重启。
+
+# ---------------------------------------------------------------
+# AGH API 端口与凭据：yaml 里的 http.address 端口才是真的（dns.port 是 DNS 端口，
+# 两者不同）；账号密码优先用 config.prop 的 agh_user / agh_pass。
+# ---------------------------------------------------------------
+agh_api_port() {
+    _ap=$(awk '/^http:/{f=1;next} f&&/^[^[:space:]]/{exit} f&&/^[[:space:]]*address:/{print $2;exit}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null | sed 's/.*://')
+    case "$_ap" in ''|*[!0-9]*) _ap=40251 ;; esac
+    printf '%s' "$_ap"
+}
+agh_api_user() { printf '%s' "${agh_user:-root}"; }
+agh_api_pass() { printf '%s' "${agh_pass:-root}"; }
+
 sd_health_guard() {
     _try=0
     while [ "$_try" -lt 2 ]; do
@@ -465,6 +618,11 @@ sd_health_guard() {
 }
 
 agh_filter_heal() {
+
+    if [ "${HAVE_CURL:-1}" != "1" ]; then
+        log "[WARN] 本机没有 curl，跳过过滤器自愈（请手动在 6081/80 管理页刷新）。"
+        return 0
+    fi
     command -v curl >/dev/null 2>&1 || return 0
     _port=$(awk '/^http:/{f=1;next} f&&/^[^[:space:]]/{exit} f&&/^[[:space:]]*address:/{print $2;exit}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null)
     _port=${_port##*:}
@@ -474,10 +632,19 @@ agh_filter_heal() {
     [ -n "$_u" ] || _u=root
     [ -n "$_p" ] || _p=root
     _ck="/data/local/tmp/.agh_ck.$$"
-    _lc=$(curl -s -m 6 -o /dev/null -w '%{http_code}' -c "$_ck" \
-          -H "Content-Type: application/json" \
-          -d "{\"name\":\"$_u\",\"password\":\"$_p\"}" \
-          "http://127.0.0.1:$_port/control/login" 2>/dev/null)
+    # AGH 刚起来时 /control/* 路由可能还没注册完（首次启动实测返回
+    # "404 page not found"，随后让整个自愈流程空转），所以这里轮询到登录成功。
+    _lc=""
+    _i=0
+    while [ "$_i" -lt 20 ]; do
+        _lc=$(curl -s -m 6 -o /dev/null -w '%{http_code}' -c "$_ck" \
+              -H "Content-Type: application/json" \
+              -d "{\"name\":\"$_u\",\"password\":\"$_p\"}" \
+              "http://127.0.0.1:$_port/control/login" 2>/dev/null)
+        [ "$_lc" = "200" ] && break
+        _i=$((_i + 1))
+        sleep 1
+    done
     if [ "$_lc" != "200" ]; then
         rm -f "$_ck"
         [ "$lang" = "zh" ] && log "[WARN] 无法登录 AGH API（HTTP ${_lc:-无}，改 config.prop 的 agh_user/agh_pass），跳过过滤器自愈。" \
@@ -502,9 +669,19 @@ agh_filter_heal() {
             rm -f "$_ck"
             return 0
         fi
-        _r=$(curl -s -m 180 -b "$_ck" -H "Content-Type: application/json" \
-             -d "{\"whitelist\":false,\"ids\":[$_ids]}" \
-             "http://127.0.0.1:$_port/control/filtering/refresh" 2>/dev/null)
+        _r=""
+        _i=0
+        while [ "$_i" -lt 3 ]; do
+            _r=$(curl -s -m 180 -b "$_ck" -H "Content-Type: application/json" \
+                 -d "{\"whitelist\":false,\"ids\":[$_ids]}" \
+                 "http://127.0.0.1:$_port/control/filtering/refresh" 2>/dev/null)
+            # 路由未就绪时 busybox/AGH 会回 "404 page not found"，重试即可
+            case "$_r" in
+                *'"updated"'*) break ;;
+            esac
+            _i=$((_i + 1))
+            sleep 2
+        done
         [ "$lang" = "zh" ] && log "过滤器缓存为空，已触发重新下载：${_r:-无响应}" \
                            || log "Filter caches were empty; triggered a fresh download: ${_r:-no response}"
         _after=$(curl -s -m 15 -b "$_ck" "http://127.0.0.1:$_port/control/filtering/status" 2>/dev/null \
@@ -519,7 +696,35 @@ agh_filter_heal() {
 # ---------------------------------------------------------------
 # 启动 AdGuardHome
 # ---------------------------------------------------------------
-if ! agh_running; then
+# ---------------------------------------------------------------
+# 启动锁：service.sh 与 scripts/iptables.sh 的守护循环都会
+# 「检测不到 AGH 就拉起」。开机瞬间两边可能同时判定「没在跑」，
+# 于是各起一个实例抢同一个端口（实测出现过双 AGH 进程）。
+# 用 mkdir 原子锁串行化：拿到锁才能启动，启动完释放；
+# 拿不到锁就等对方把 AGH 拉起来，等到就跳过。
+# ---------------------------------------------------------------
+start_agh_locked() {
+    _aghlk="$AGH_DIR/.agh.start.lock"
+    if ! mkdir "$_aghlk" 2>/dev/null; then
+        _i=0
+        while [ "$_i" -lt 24 ]; do
+            agh_running && break
+            sleep 0.5
+            _i=$((_i + 1))
+        done
+        if agh_running; then
+            [ "$lang" = "zh" ] && log "AdGuardHome 已由其它进程启动，跳过。" \
+                               || log "AdGuardHome already started by another process, skipping."
+            return 0
+        fi
+        # 对方没能在 12 秒内拉起来，认为锁是残留，清掉后自己启动
+        rm -rf "$_aghlk" 2>/dev/null
+        mkdir "$_aghlk" 2>/dev/null || return 0
+    fi
+    if agh_running; then
+        rm -rf "$_aghlk" 2>/dev/null
+        return 0
+    fi
     # 校验yaml，损坏则恢复备份
     if ! "$BIN_DIR/AdGuardHome" --check-config -c "$BIN_DIR/AdGuardHome.yaml" >/dev/null 2>&1; then
         [ "$lang" = "zh" ] && log "yaml 校验失败，恢复备份。" || log "yaml check failed, restoring backup."
@@ -534,6 +739,12 @@ if ! agh_running; then
     else
         [ "$lang" = "zh" ] && log "AdGuardHome 启动失败，尝试重启..." || log "AdGuardHome failed to start, attempting restart..."
     fi
+    rm -rf "$_aghlk" 2>/dev/null
+    return 0
+}
+
+if ! agh_running; then
+    start_agh_locked
 fi
 
 # 端到端健康检查：解析不通就重启 SmartDNS（装/升级后首次启动的老毛病）

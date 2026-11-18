@@ -1,4 +1,81 @@
 #!/system/bin/sh
+
+# PORT [udp|tcp] → 0 表示本机有人在听这个端口（含绑 0.0.0.0 / [::] 的服务）
+port_listening() {
+    _port="$1"; _proto="${2:-udp}"
+    if command -v netstat >/dev/null 2>&1; then
+        case "$_proto" in
+            udp) netstat -lun 2>/dev/null | grep -qE "(^|[^0-9.])($_port) " && return 0 ;;
+            *)   netstat -ltn 2>/dev/null | grep -qE "(^|[^0-9.])($_port) " && return 0 ;;
+        esac
+        return 1
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        case "$_proto" in
+            udp) ss -lun 2>/dev/null | grep -q "[:.]$_port " && return 0 ;;
+            *)   ss -ltn 2>/dev/null | grep -q "[:.]$_port " && return 0 ;;
+        esac
+        return 1
+    fi
+    # 最后兜底：直接读 /proc/net（端口是十六进制；绑 0.0.0.0 或 [::] 也算在听）
+    _hex=$(printf '%04X' "$_port")
+    case "$_proto" in
+        udp) _fl="/proc/net/udp /proc/net/udp6" ;;
+        *)   _fl="/proc/net/tcp /proc/net/tcp6" ;;
+    esac
+    for _f1 in $_fl; do
+        [ -r "$_f1" ] || continue
+        awk -v h=":$_hex" -v want="$_proto" '
+            NR > 1 {
+                split($2, a, ":")
+                if (":" a[2] != h) next
+                # 本地地址：127.0.0.1 / 0.0.0.0 / :: 都算可达
+                ip = toupper(a[1])
+                if (ip != "0100007F" && ip !~ /^0+$/ && ip !~ /0{16}FFFF0100007F$/) next
+                if (want == "udp") { if ($4 == "07") found = 1 }
+                else               { if ($4 == "0A") found = 1 }
+            }
+            END { exit(found ? 0 : 1) }' "$_f1" && return 0
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------
+# 设备兼容层（第二批）：
+#   mountpoint  部分老 toybox 没有 → 用 /proc/mounts 兜底
+#   setsid      极少数 ROM 裁掉 → 退回 nohup + &
+#   chroot      缺失时给出明确报错，而不是静默不启动 SmartDNS
+# ---------------------------------------------------------------
+if ! command -v mountpoint >/dev/null 2>&1; then
+    mountpoint() {
+        _q=""
+        [ "$1" = "-q" ] && { _q=1; shift; }
+        grep -qs " $1 " /proc/mounts
+    }
+fi
+
+if ! command -v dirname >/dev/null 2>&1; then
+    dirname() { printf '%s\n' "${1%/*}"; }
+fi
+if ! command -v basename >/dev/null 2>&1; then
+    basename() {
+        _s="${1%/}"
+        printf '%s\n' "${_s##*/}"
+    }
+fi
+
+if ! command -v setsid >/dev/null 2>&1; then
+    setsid() {
+        # 没有 setsid：直接后台（不依赖 nohup —— 少数 ROM 两个都没有）
+        "$@" </dev/null >/dev/null 2>&1 &
+    }
+fi
+
+sd_chroot_ok() {
+    command -v chroot >/dev/null 2>&1 && return 0
+    log "[ERROR] 本机没有 chroot 命令，SmartDNS 无法在容器内运行；请改用其他机型或内置的替代上游。"
+    return 1
+}
 # ============================================================
 # 重启 SmartDNS（供上游服务器管理页调用）
 # 先杀掉进程，等守护进程（iptables.sh 的 smartdns 守护）拉起；
@@ -14,8 +91,7 @@ BIN="$SD/usr/local/lib/smartdns/smartdns"
 wait_port_free() {
     _p="$1"; _i=0
     while [ "$_i" -lt 12 ]; do
-        if ! netstat -lun 2>/dev/null | grep -q "127.0.0.1:$_p " \
-           && ! netstat -ltn 2>/dev/null | grep -q "127.0.0.1:$_p "; then
+        if ! port_listening "$_p" udp && ! port_listening "$_p" tcp; then
             return 0
         fi
         sleep 0.5
@@ -70,7 +146,7 @@ if [ "$encn" -gt 0 ] && [ -x "$AGH_DIR/bin/dnsenc" ]; then
         -bootstrap "${DNSENC_BOOTSTRAP:-180.184.1.1:53}" >> "$AGH_DIR/dnsenc.log" 2>&1 &
     _i=0
     while [ "$_i" -lt 12 ]; do
-        netstat -lun 2>/dev/null | grep -q '127.0.0.1:6054 ' && break
+        port_listening 6054 udp && break
         sleep 0.5; _i=$((_i+1))
     done
 fi
@@ -93,10 +169,11 @@ stop_smartdns() {
 }
 
 sd_listening() {
-    netstat -lun 2>/dev/null | grep -q '127.0.0.1:6053 '
+    port_listening 6053 udp
 }
 
 start_sd() {
+    sd_chroot_ok || return 1
     setsid chroot "$SD" /usr/local/lib/smartdns/smartdns >/dev/null 2>&1 &
     _i=0
     while [ "$_i" -lt 20 ]; do

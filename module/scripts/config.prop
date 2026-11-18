@@ -38,3 +38,8 @@ agh_pass=root
 #            只在你确认本网络有可用 v4 DNS 时手动开。
 #   keep     完全不碰 v6（等于放弃 v6 的 DNS 过滤）。
 v6_dns=auto
+
+# SmartDNS 面板（6080）的登录账号，sd_suspend_guard 用它查「请求处理是否暂停」。
+# 在面板里改过密码的话，记得同步这里。
+sd_user=root
+sd_pass=root

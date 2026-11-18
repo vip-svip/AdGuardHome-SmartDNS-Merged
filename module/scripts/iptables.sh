@@ -1,6 +1,18 @@
 #!/system/bin/sh
 AGH_DIR="/data/adb/agh"
 BIN_DIR="$AGH_DIR/bin"
+
+# ---------------------------------------------------------------
+# CPU 架构守卫：模块自带的是 arm64 静态二进制。32 位设备上一跑就是
+# "Exec format error"，日志里很难看出原因，所以启动前先判一次并写清楚。
+# ---------------------------------------------------------------
+ARCH_OK=1
+case "$(getprop ro.product.cpu.abi 2>/dev/null)" in
+    arm64*|aarch64*) ARCH_OK=1 ;;
+    x86*|i386*|i686*) ARCH_OK=0 ;;
+    armeabi*|arm*) ARCH_OK=0 ;;
+    *) case "$(uname -m 2>/dev/null)" in aarch64|arm64) ARCH_OK=1 ;; *) ARCH_OK=0 ;; esac ;;
+esac
 . "$AGH_DIR/scripts/config.prop"
 MAIN_LOG="$AGH_DIR/agh.log"
 
@@ -28,6 +40,128 @@ MAIN_LOG="$AGH_DIR/agh.log"
 # 老版 config.prop 里可能没有这些键，给默认值
 [ -n "$vpn_compat" ] || vpn_compat=auto
 [ -n "$vpn_apps" ] || vpn_apps=""
+
+# ---------------------------------------------------------------
+# 设备兼容：iptables 的 -w（xtables 锁）参数
+# Android 上 iptables 的后端和版本差异很大：legacy 1.8.x 支持 -w，老的 1.4.x
+# 不支持，nft 后端在部分 ROM 上又是另一套行为。带不被支持的参数会直接报错，
+# 整条链都建不起来，所以这里探测一次，不支持就去掉。
+# ---------------------------------------------------------------
+IPT_W="-w 2"
+iptables $IPT_W -t nat -S OUTPUT >/dev/null 2>&1 || IPT_W=""
+ip6tables $IPT_W -t mangle -S OUTPUT >/dev/null 2>&1 || IPT_W=""
+
+# ---------------------------------------------------------------
+# 设备兼容层：不同 ROM / root 方案下外部命令的可用性差异
+#   pgrep    个别 ROM 的 toybox 里被裁掉了 → 用 /proc 兜底
+#   netstat  较新的 toybox 已移除 → 用 ss 或 /proc/net 兜底
+#   curl     Android 10+ 一般自带；缺失时相关自愈功能降级
+# ---------------------------------------------------------------
+if ! command -v pgrep >/dev/null 2>&1; then
+    pgrep() {
+        _m="$1"; shift
+        case "$_m" in
+            -P) _pp="$1"
+                for _d in /proc/[0-9]*; do
+                    _st=$(cat "$_d/stat" 2>/dev/null) || continue
+                    _ppid=$(printf '%s' "$_st" | awk '{print $4}')
+                    [ "$_ppid" = "$_pp" ] && echo "${_d#/proc/}"
+                done ;;
+            -f) for _d in /proc/[0-9]*; do
+                    [ -r "$_d/cmdline" ] || continue
+                    tr '\0' ' ' < "$_d/cmdline" 2>/dev/null | grep -q -- "$1" && echo "${_d#/proc/}"
+                done ;;
+            *)  for _d in /proc/[0-9]*; do
+                    [ "$(cat "$_d/comm" 2>/dev/null)" = "$1" ] && echo "${_d#/proc/}"
+                done ;;
+        esac
+    }
+fi
+
+# PORT [udp|tcp] → 0 表示本机 127.0.0.1 上有人在听
+# PORT [udp|tcp] → 0 表示本机有人在听这个端口（含绑 0.0.0.0 / [::] 的服务）
+port_listening() {
+    _port="$1"; _proto="${2:-udp}"
+    if command -v netstat >/dev/null 2>&1; then
+        case "$_proto" in
+            udp) netstat -lun 2>/dev/null | grep -qE "(^|[^0-9.])($_port) " && return 0 ;;
+            *)   netstat -ltn 2>/dev/null | grep -qE "(^|[^0-9.])($_port) " && return 0 ;;
+        esac
+        return 1
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        case "$_proto" in
+            udp) ss -lun 2>/dev/null | grep -q "[:.]$_port " && return 0 ;;
+            *)   ss -ltn 2>/dev/null | grep -q "[:.]$_port " && return 0 ;;
+        esac
+        return 1
+    fi
+    # 最后兜底：直接读 /proc/net（端口是十六进制；绑 0.0.0.0 或 [::] 也算在听）
+    _hex=$(printf '%04X' "$_port")
+    case "$_proto" in
+        udp) _fl="/proc/net/udp /proc/net/udp6" ;;
+        *)   _fl="/proc/net/tcp /proc/net/tcp6" ;;
+    esac
+    for _f1 in $_fl; do
+        [ -r "$_f1" ] || continue
+        awk -v h=":$_hex" -v want="$_proto" '
+            NR > 1 {
+                split($2, a, ":")
+                if (":" a[2] != h) next
+                # 本地地址：127.0.0.1 / 0.0.0.0 / :: 都算可达
+                ip = toupper(a[1])
+                if (ip != "0100007F" && ip !~ /^0+$/ && ip !~ /0{16}FFFF0100007F$/) next
+                if (want == "udp") { if ($4 == "07") found = 1 }
+                else               { if ($4 == "0A") found = 1 }
+            }
+            END { exit(found ? 0 : 1) }' "$_f1" && return 0
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------
+# 设备兼容层（第二批）：
+#   mountpoint  部分老 toybox 没有 → 用 /proc/mounts 兜底
+#   setsid      极少数 ROM 裁掉 → 退回 nohup + &
+#   chroot      缺失时给出明确报错，而不是静默不启动 SmartDNS
+# ---------------------------------------------------------------
+if ! command -v mountpoint >/dev/null 2>&1; then
+    mountpoint() {
+        _q=""
+        [ "$1" = "-q" ] && { _q=1; shift; }
+        grep -qs " $1 " /proc/mounts
+    }
+fi
+
+if ! command -v dirname >/dev/null 2>&1; then
+    dirname() { printf '%s\n' "${1%/*}"; }
+fi
+if ! command -v basename >/dev/null 2>&1; then
+    basename() {
+        _s="${1%/}"
+        printf '%s\n' "${_s##*/}"
+    }
+fi
+
+if ! command -v setsid >/dev/null 2>&1; then
+    setsid() {
+        # 没有 setsid：直接后台（不依赖 nohup —— 少数 ROM 两个都没有）
+        "$@" </dev/null >/dev/null 2>&1 &
+    }
+fi
+
+sd_chroot_ok() {
+    command -v chroot >/dev/null 2>&1 && return 0
+    log "[ERROR] 本机没有 chroot 命令，SmartDNS 无法在容器内运行；请改用其他机型或内置的替代上游。"
+    return 1
+}
+
+# 系统时区（AGH 没设 TZ 会把日志全写成 UTC）
+if [ -z "$TZ" ]; then
+    TZ=$(getprop persist.sys.timezone 2>/dev/null)
+    [ -n "$TZ" ] || TZ=Asia/Shanghai
+    export TZ
+fi
 
 # dnsenc 的 bootstrap 明文上游（解析 DoH/DoT 主机名用）。必须选「系统 DNS 不会用」的地址：
 # 它的豁免规则是 root + 该目的 IP + 53，如果这个 IP 同时出现在运营商下发的系统 DNS 里，
@@ -79,6 +213,25 @@ agh_running() {
 
 # 启动AdGuardHome
 start_agh() {
+    # -----------------------------------------------------------
+    # 启动锁：service.sh 与 iptables.sh 守护都会「检测不到就拉起」，
+    # 开机瞬间两边可能同时判「没在跑」→ 起两个实例、抢同一个端口。
+    # 用 mkdir 原子锁串行化，并二次确认。
+    # -----------------------------------------------------------
+    _lk="$AGH_DIR/.agh.start.lock"
+    if ! mkdir "$_lk" 2>/dev/null; then
+        _i=0
+        while [ "$_i" -lt 24 ]; do
+            agh_running && { rm -rf "$_lk" 2>/dev/null; return 0; }
+            sleep 0.5
+            _i=$((_i + 1))
+        done
+        rm -rf "$_lk" 2>/dev/null
+    fi
+    if agh_running; then
+        rm -rf "$_lk" 2>/dev/null
+        return 0
+    fi
     {
         case "$(getprop persist.sys.locale)" in
             zh*) echo "$(date '+%F %T') AdGuardHome 进程丢失，正在重启..." ;;
@@ -86,7 +239,15 @@ start_agh() {
         esac
     } >> "$MAIN_LOG"
     export SSL_CERT_DIR="/system/etc/security/cacerts/"
+    # 部分设备（尤其首次启动、存储忙）打开 sqlite 会话库会 1 秒超时，AGH 直接致命退出。
+    # 看到这个错误就把会话库删掉重来（只是登录态，删了没损失）。
+    if tail -n 20 "$BIN_DIR/crash.log" 2>/dev/null | grep -q 'sessions.db'; then
+        rm -f "$BIN_DIR/data/sessions.db" "$BIN_DIR/data/sessions.db-wal" "$BIN_DIR/data/sessions.db-shm" 2>/dev/null
+        echo "$(date '+%F %T') [WARN] AGH 上次因会话库打开超时退出，已清理 sessions.db 后重启。" >> "$MAIN_LOG"
+    fi
     "$BIN_DIR/AdGuardHome" --no-check-update >/dev/null 2>&1 &
+    sleep 0.3
+    rm -rf "$_lk" 2>/dev/null
 }
 
 # ---------------------------------------------------------------
@@ -172,7 +333,7 @@ V4_CHAINS="ADGUARD ADGUARDB"
 active_v4() {
     for _c in $V4_CHAINS; do
         [ -n "$_c" ] || continue
-        iptables -w 2 -t nat -C OUTPUT -j "$_c" >/dev/null 2>&1 && { printf '%s' "$_c"; return 0; }
+        iptables $IPT_W -t nat -C OUTPUT -j "$_c" >/dev/null 2>&1 && { printf '%s' "$_c"; return 0; }
     done
     return 0
 }
@@ -181,7 +342,7 @@ active_v4() {
 v4_rules() {
     _c=$(active_v4)
     [ -n "$_c" ] || _c=ADGUARD
-    iptables -w 2 -t nat -S "$_c" 2>/dev/null | grep -c '^-A'
+    iptables $IPT_W -t nat -S "$_c" 2>/dev/null | grep -c '^-A'
 }
 
 jump_present() {
@@ -194,17 +355,17 @@ swap_jump_to() {
     _c=$(active_v4)
     [ "$_c" = "$_t" ] && return 0
     if [ -n "$_c" ]; then
-        _n=$(iptables -w 2 -t nat -S OUTPUT 2>/dev/null | awk '
+        _n=$(iptables $IPT_W -t nat -S OUTPUT 2>/dev/null | awk '
             /^-A / { c++; if ($0 ~ /-j ADGUARD$/ || $0 ~ /-j ADGUARDB$/) { print c; exit } }')
         if [ -n "$_n" ]; then
-            if iptables -w 2 -t nat -R OUTPUT "$_n" -j "$_t" 2>/dev/null; then
+            if iptables $IPT_W -t nat -R OUTPUT "$_n" -j "$_t" 2>/dev/null; then
                 return 0
             fi
         fi
         # -R 失败（规则号算错之类）：退回先删后加
         drop_jump
     fi
-    iptables -w 2 -t nat -A OUTPUT -j "$_t" 2>/dev/null
+    iptables $IPT_W -t nat -A OUTPUT -j "$_t" 2>/dev/null
 }
 
 ensure_jump() {
@@ -220,8 +381,8 @@ drop_jump() {
     while [ "$_n" -lt 6 ]; do
         _hit=0
         for _c in $V4_CHAINS; do
-            if iptables -w 2 -t nat -C OUTPUT -j "$_c" >/dev/null 2>&1; then
-                if iptables -w 2 -t nat -D OUTPUT -j "$_c" 2>/dev/null; then
+            if iptables $IPT_W -t nat -C OUTPUT -j "$_c" >/dev/null 2>&1; then
+                if iptables $IPT_W -t nat -D OUTPUT -j "$_c" 2>/dev/null; then
                     _hit=1
                 fi
             fi
@@ -241,9 +402,9 @@ drop_stale_v4() {
         # 安全阀：还在被 OUTPUT 引用就绝对不动，否则会出现
         # 「跳转指向一条被 -F 空了的链」= 劫持看着在、其实全放行
         [ "$_c" = "$_act" ] && continue
-        iptables -w 2 -t nat -S "$_c" >/dev/null 2>&1 || continue
-        iptables -w 2 -t nat -F "$_c" 2>/dev/null
-        iptables -w 2 -t nat -X "$_c" 2>/dev/null
+        iptables $IPT_W -t nat -S "$_c" >/dev/null 2>&1 || continue
+        iptables $IPT_W -t nat -F "$_c" 2>/dev/null
+        iptables $IPT_W -t nat -X "$_c" 2>/dev/null
     done
 }
 
@@ -297,12 +458,12 @@ v6nat_ok() {
         0) return 1 ;;
     esac
     V6_NAT_OK=0
-    if ! ip6tables -w 2 -t nat -L -n >/dev/null 2>&1; then
+    if ! ip6tables $IPT_W -t nat -L -n >/dev/null 2>&1; then
         for _m in ip6table_nat nf_nat_ipv6 xt_nat; do
             modprobe "$_m" 2>/dev/null
         done
     fi
-    ip6tables -w 2 -t nat -L -n >/dev/null 2>&1 && V6_NAT_OK=1
+    ip6tables $IPT_W -t nat -L -n >/dev/null 2>&1 && V6_NAT_OK=1
     [ "$V6_NAT_OK" = 1 ]
 }
 
@@ -344,29 +505,29 @@ v6_effective() {
 }
 
 v6_present() {
-    ip6tables -w 2 -t nat -L "$ADG6_CHAIN" >/dev/null 2>&1
+    ip6tables $IPT_W -t nat -L "$ADG6_CHAIN" >/dev/null 2>&1
 }
 
 v6m_present() {
-    ip6tables -w 2 -t mangle -L "$V6M_CHAIN" >/dev/null 2>&1
+    ip6tables $IPT_W -t mangle -L "$V6M_CHAIN" >/dev/null 2>&1
 }
 
 v6m_jumped() {
-    ip6tables -w 2 -t mangle -C OUTPUT -j "$V6M_CHAIN" >/dev/null 2>&1
+    ip6tables $IPT_W -t mangle -C OUTPUT -j "$V6M_CHAIN" >/dev/null 2>&1
 }
 
 v6m_unjump() {
     _n=0
     while [ "$_n" -lt 5 ] && v6m_jumped; do
-        ip6tables -w 2 -t mangle -D OUTPUT -j "$V6M_CHAIN" 2>/dev/null || break
+        ip6tables $IPT_W -t mangle -D OUTPUT -j "$V6M_CHAIN" 2>/dev/null || break
         _n=$((_n+1))
     done
 }
 
 v6nat_unjump() {
     _n=0
-    while [ "$_n" -lt 5 ] && ip6tables -w 2 -t nat -C OUTPUT -j "$ADG6_CHAIN" >/dev/null 2>&1; do
-        ip6tables -w 2 -t nat -D OUTPUT -j "$ADG6_CHAIN" 2>/dev/null || break
+    while [ "$_n" -lt 5 ] && ip6tables $IPT_W -t nat -C OUTPUT -j "$ADG6_CHAIN" >/dev/null 2>&1; do
+        ip6tables $IPT_W -t nat -D OUTPUT -j "$ADG6_CHAIN" 2>/dev/null || break
         _n=$((_n+1))
     done
 }
@@ -375,13 +536,13 @@ v6nat_unjump() {
 v6_cleanup() {
     v6m_unjump
     if v6m_present; then
-        ip6tables -w 2 -t mangle -F "$V6M_CHAIN" 2>/dev/null
-        ip6tables -w 2 -t mangle -X "$V6M_CHAIN" 2>/dev/null
+        ip6tables $IPT_W -t mangle -F "$V6M_CHAIN" 2>/dev/null
+        ip6tables $IPT_W -t mangle -X "$V6M_CHAIN" 2>/dev/null
     fi
     if v6_present; then
         v6nat_unjump
-        ip6tables -w 2 -t nat -F "$ADG6_CHAIN" 2>/dev/null
-        ip6tables -w 2 -t nat -X "$ADG6_CHAIN" 2>/dev/null
+        ip6tables $IPT_W -t nat -F "$ADG6_CHAIN" 2>/dev/null
+        ip6tables $IPT_W -t nat -X "$ADG6_CHAIN" 2>/dev/null
     fi
 }
 
@@ -389,14 +550,14 @@ v6_cleanup() {
 # 与 VPN 应用 uid，避免把 VPN 自己的 DNS 也吞掉。
 # 不再豁免 uid 0：netd 就是 uid 0，豁免它等于让系统解析器绕过 AGH。
 v6_exempt() {
-    ip6tables -w 2 "$@" -m owner --uid-owner 9999 -j RETURN 2>/dev/null
-    ip6tables -w 2 "$@" -o lo -j RETURN 2>/dev/null
+    ip6tables $IPT_W "$@" -m owner --uid-owner 9999 -j RETURN 2>/dev/null
+    ip6tables $IPT_W "$@" -o lo -j RETURN 2>/dev/null
     [ "$vpn_compat" = proxy ] || return 0
     for _o in tun tap ppp utun wg ipsec; do
-        ip6tables -w 2 "$@" -o "${_o}+" -j RETURN 2>/dev/null
+        ip6tables $IPT_W "$@" -o "${_o}+" -j RETURN 2>/dev/null
     done
     for _u in $(vpn_uids); do
-        ip6tables -w 2 "$@" -m owner --uid-owner "$_u" -j RETURN 2>/dev/null
+        ip6tables $IPT_W "$@" -m owner --uid-owner "$_u" -j RETURN 2>/dev/null
     done
 }
 
@@ -412,12 +573,12 @@ apply_v6() {
     fi
 
     if [ "$_mode" = redirect ]; then
-        ip6tables -w 2 -t nat -N "$ADG6_CHAIN" 2>/dev/null
+        ip6tables $IPT_W -t nat -N "$ADG6_CHAIN" 2>/dev/null
         if v6_present; then
             v6_exempt -t nat -A "$ADG6_CHAIN"
-            ip6tables -w 2 -t nat -A "$ADG6_CHAIN" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null
-            ip6tables -w 2 -t nat -A "$ADG6_CHAIN" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null
-            ip6tables -w 2 -t nat -A OUTPUT -j "$ADG6_CHAIN" 2>/dev/null
+            ip6tables $IPT_W -t nat -A "$ADG6_CHAIN" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null
+            ip6tables $IPT_W -t nat -A "$ADG6_CHAIN" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null
+            ip6tables $IPT_W -t nat -A OUTPUT -j "$ADG6_CHAIN" 2>/dev/null
             v6_log "[INFO] IPv6：nat REDIRECT 劫持 v6 DNS -> $redir_port"
             return 0
         fi
@@ -426,12 +587,12 @@ apply_v6() {
     fi
 
     if [ "$_mode" = drop ]; then
-        ip6tables -w 2 -t mangle -N "$V6M_CHAIN" 2>/dev/null
+        ip6tables $IPT_W -t mangle -N "$V6M_CHAIN" 2>/dev/null
         if v6m_present; then
             v6_exempt -t mangle -A "$V6M_CHAIN"
-            ip6tables -w 2 -t mangle -A "$V6M_CHAIN" -p udp --dport 53 -j DROP 2>/dev/null
-            ip6tables -w 2 -t mangle -A "$V6M_CHAIN" -p tcp --dport 53 -j DROP 2>/dev/null
-            ip6tables -w 2 -t mangle -A OUTPUT -j "$V6M_CHAIN" 2>/dev/null
+            ip6tables $IPT_W -t mangle -A "$V6M_CHAIN" -p udp --dport 53 -j DROP 2>/dev/null
+            ip6tables $IPT_W -t mangle -A "$V6M_CHAIN" -p tcp --dport 53 -j DROP 2>/dev/null
+            ip6tables $IPT_W -t mangle -A OUTPUT -j "$V6M_CHAIN" 2>/dev/null
             v6_log "[INFO] IPv6：内核无 nat 表，改用 mangle 丢弃 v6 DNS（系统回落 v4 劫持链）"
         else
             v6_log "[WARN] IPv6：mangle 表也不可用，v6 DNS 未做处理"
@@ -463,13 +624,13 @@ rebuild_rules_raw() {
         ADGUARDB) _new=ADGUARD ;;
         *)        _new=ADGUARD ;;
     esac
-    iptables -w 2 -t nat -L "$_new" >/dev/null 2>&1 || iptables -w 2 -t nat -N "$_new"
-    iptables -w 2 -t nat -F "$_new"
+    iptables $IPT_W -t nat -L "$_new" >/dev/null 2>&1 || iptables $IPT_W -t nat -N "$_new"
+    iptables $IPT_W -t nat -F "$_new"
 
     if [ "$_yield" = 1 ]; then
         # 让路：链里只留一条 RETURN，并且把跳转从 OUTPUT 摘掉，
         # 这样代理/VPN 自己插的 dport 53 规则可以安安静静排第一位。
-        iptables -w 2 -t nat -A "$_new" -j RETURN
+        iptables $IPT_W -t nat -A "$_new" -j RETURN
         drop_jump
         drop_stale_v4 "$_new"
         log_vpn "[INFO] 检测到 VPN 接口($_vifs)，DNS 劫持已让路（vpn_compat=auto），解析交给 VPN 自己处理"
@@ -478,31 +639,31 @@ rebuild_rules_raw() {
     fi
 
     # uid 9999 (SmartDNS) 豁免：它的明文上游查询要直出，不能被自己劫持
-    iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 9999 -j RETURN
+    iptables $IPT_W -t nat -A "$_new" -m owner --uid-owner 9999 -j RETURN
     # 回环豁免：本机解析器（127.0.0.1:53 之类）不出网，劫持它没有意义还会自环
-    iptables -w 2 -t nat -A "$_new" -o lo -j RETURN
+    iptables $IPT_W -t nat -A "$_new" -o lo -j RETURN
     # 精确豁免 dnsenc 的 bootstrap 查询：它用 root 身份问 $DNSENC_BOOTSTRAP 解析 DoH/DoT 主机名。
     # 目的地址必须挑一个「系统 DNS 不会用」的（这里 180.184.1.1）。早先用 223.5.5.5，
     # 结果运营商给的系统 DNS 里正好有 223.5.5.5，netd 的查询连同豁免一起绕过 AGH。
-    iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 0 -d "$DNSENC_BOOTSTRAP_IP" -p udp --dport 53 -j RETURN
-    iptables -w 2 -t nat -A "$_new" -m owner --uid-owner 0 -d "$DNSENC_BOOTSTRAP_IP" -p tcp --dport 53 -j RETURN
+    iptables $IPT_W -t nat -A "$_new" -m owner --uid-owner 0 -d "$DNSENC_BOOTSTRAP_IP" -p udp --dport 53 -j RETURN
+    iptables $IPT_W -t nat -A "$_new" -m owner --uid-owner 0 -d "$DNSENC_BOOTSTRAP_IP" -p tcp --dport 53 -j RETURN
     # 注意：不再有「uid 0 全豁免」。root 里除了 AGH/dnsenc，还有 netd ——
     # 系统解析器 dnsproxyd 就是 uid 0，全豁免等于让所有 App 的 DNS 绕过 AGH。
     if [ "$vpn_compat" = proxy ]; then
         # 出接口是隧道的查询属于 VPN 自己，抢了会成环 / 打乱 fake-ip
         for _o in tun tap ppp utun wg ipsec; do
-            iptables -w 2 -t nat -A "$_new" -o "${_o}+" -j RETURN 2>/dev/null
+            iptables $IPT_W -t nat -A "$_new" -o "${_o}+" -j RETURN 2>/dev/null
         done
         for _u in $_uids; do
-            iptables -w 2 -t nat -A "$_new" -m owner --uid-owner "$_u" -j RETURN 2>/dev/null
+            iptables $IPT_W -t nat -A "$_new" -m owner --uid-owner "$_u" -j RETURN 2>/dev/null
         done
         log_vpn "[INFO] vpn_compat=proxy：保留 DNS 劫持，已豁免隧道出流量${_vifs:+（当前 $_vifs）}与 VPN 应用自身的查询"
     else
         log_vpn "[INFO] vpn_compat=$vpn_compat：DNS 劫持已生效（未检测到 VPN 接口）"
     fi
 
-    iptables -w 2 -t nat -A "$_new" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port"
-    iptables -w 2 -t nat -A "$_new" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port"
+    iptables $IPT_W -t nat -A "$_new" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port"
+    iptables $IPT_W -t nat -A "$_new" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port"
 
     # ---- 第三步：原子切跳转，然后收掉旧链 ----
     swap_jump_to "$_new"
@@ -546,6 +707,7 @@ start_smartdns() {
     mountpoint -q "$SD_DIR/sys" || mount --bind /sys "$SD_DIR/sys" 2>/dev/null
     mountpoint -q "$SD_DIR/tmp" || mount -t tmpfs -o mode=0777,nosuid,nodev tmpfs "$SD_DIR/tmp" 2>/dev/null
     mountpoint -q "$SD_DIR/run" || mount -t tmpfs -o mode=0777,nosuid,nodev tmpfs "$SD_DIR/run" 2>/dev/null
+    sd_chroot_ok || return 1
     setsid chroot "$SD_DIR" /usr/local/lib/smartdns/smartdns >/dev/null 2>&1 &
 }
 
@@ -625,14 +787,14 @@ while true; do
     [ -n "$V4C" ] || V4C=ADGUARD
     if expect_hijack; then
         jump_present || need_fix=1
-        iptables -w 2 -t nat -C "$V4C" -m owner --uid-owner 9999 -j RETURN 2>/dev/null || need_fix=1
-        iptables -w 2 -t nat -C "$V4C" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
-        iptables -w 2 -t nat -C "$V4C" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
+        iptables $IPT_W -t nat -C "$V4C" -m owner --uid-owner 9999 -j RETURN 2>/dev/null || need_fix=1
+        iptables $IPT_W -t nat -C "$V4C" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
+        iptables $IPT_W -t nat -C "$V4C" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
     else
         # 已让路：跳转和 REDIRECT 都不该在
         jump_present && need_fix=1
-        iptables -w 2 -t nat -C "$V4C" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
-        iptables -w 2 -t nat -C "$V4C" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
+        iptables $IPT_W -t nat -C "$V4C" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
+        iptables $IPT_W -t nat -C "$V4C" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
     fi
     _vmode=$(v6_effective)
     if [ "$_vmode" = drop ]; then
@@ -643,9 +805,9 @@ while true; do
         fi
     elif [ "$_vmode" = redirect ] && v6_present; then
         if expect_hijack; then
-            ip6tables -w 2 -t nat -C "$ADG6_CHAIN" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
+            ip6tables $IPT_W -t nat -C "$ADG6_CHAIN" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
         else
-            ip6tables -w 2 -t nat -C "$ADG6_CHAIN" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
+            ip6tables $IPT_W -t nat -C "$ADG6_CHAIN" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null && need_fix=1
         fi
     fi
 

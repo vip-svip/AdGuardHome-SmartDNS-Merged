@@ -1,4 +1,42 @@
 #!/system/bin/sh
+# ---------------------------------------------------------------
+# 设备兼容：iptables 的 -w（xtables 锁）参数
+# legacy 1.8.x 支持 -w，老的 1.4.x 不支持，nft 后端行为也不一样。带不被支持的
+# 参数会直接报错、整条链建不起来，所以探测一次，不支持就去掉。
+# ---------------------------------------------------------------
+IPT_W="-w 2"
+iptables $IPT_W -t nat -S OUTPUT >/dev/null 2>&1 || IPT_W=""
+ip6tables $IPT_W -t mangle -S OUTPUT >/dev/null 2>&1 || IPT_W=""
+
+# ---------------------------------------------------------------
+# 设备兼容：busybox httpd 的 CGI 环境 PATH 很短，pgrep 不一定可见；
+# 缺了就用 /proc 兜底（否则「重启/刷新」类 action 会误判服务没在跑）。
+# ---------------------------------------------------------------
+if ! command -v dirname >/dev/null 2>&1; then
+    dirname() { printf '%s\n' "${1%/*}"; }
+fi
+if ! command -v basename >/dev/null 2>&1; then
+    basename() { _s="${1%/}"; printf '%s\n' "${_s##*/}"; }
+fi
+if ! command -v pgrep >/dev/null 2>&1; then
+    pgrep() {
+        _m="$1"; shift
+        case "$_m" in
+            -P) _pp="$1"
+                for _d in /proc/[0-9]*; do
+                    _ppid=$(awk '{print $4}' "$_d/stat" 2>/dev/null) || continue
+                    [ "$_ppid" = "$_pp" ] && echo "${_d#/proc/}"
+                done ;;
+            -f) for _d in /proc/[0-9]*; do
+                    [ -r "$_d/cmdline" ] || continue
+                    tr '\0' ' ' < "$_d/cmdline" 2>/dev/null | grep -q -- "$1" && echo "${_d#/proc/}"
+                done ;;
+            *)  for _d in /proc/[0-9]*; do
+                    [ "$(cat "$_d/comm" 2>/dev/null)" = "$1" ] && echo "${_d#/proc/}"
+                done ;;
+        esac
+    }
+fi
 # ============================================================
 # SmartDNS 上游服务器管理 CGI —— busybox httpd @ 127.0.0.1:6081
 #
@@ -441,7 +479,7 @@ V4_CHAINS="ADGUARD ADGUARDB"
 active_v4() {
     for _c in $V4_CHAINS; do
         [ -n "$_c" ] || continue
-        iptables -w 2 -t nat -C OUTPUT -j "$_c" >/dev/null 2>&1 && { printf '%s' "$_c"; return 0; }
+        iptables $IPT_W -t nat -C OUTPUT -j "$_c" >/dev/null 2>&1 && { printf '%s' "$_c"; return 0; }
     done
     return 0
 }
@@ -453,7 +491,7 @@ jump_present() {
 agh_rule_count() {
     _c=$(active_v4)
     [ -n "$_c" ] || _c=ADGUARD
-    n=$(iptables -w 2 -t nat -S "$_c" 2>/dev/null | grep -c "^-A $_c" 2>/dev/null)
+    n=$(iptables $IPT_W -t nat -S "$_c" 2>/dev/null | grep -c "^-A $_c" 2>/dev/null)
     [ -n "$n" ] || n=0
     printf '%s' "$n"
 }
@@ -461,7 +499,7 @@ agh_rule_count() {
 agh_redirect_count() {
     _c=$(active_v4)
     [ -n "$_c" ] || _c=ADGUARD
-    n=$(iptables -w 2 -t nat -S "$_c" 2>/dev/null | grep -c 'REDIRECT --to-ports' 2>/dev/null)
+    n=$(iptables $IPT_W -t nat -S "$_c" 2>/dev/null | grep -c 'REDIRECT --to-ports' 2>/dev/null)
     [ -n "$n" ] || n=0
     printf '%s' "$n"
 }
@@ -475,7 +513,7 @@ v6_mode_raw() {
 }
 
 v6_nat_ok() {
-    ip6tables -w 2 -t nat -L -n >/dev/null 2>&1
+    ip6tables $IPT_W -t nat -L -n >/dev/null 2>&1
 }
 
 # auto 且无 nat 表时该 drop 还是 keep：读 iptables.sh 自检写下的结论
@@ -505,8 +543,8 @@ v6_effective_mode() {
 
 v6_hijack_on() {
     # 以「实际挂上的跳转」为准：只要 mangle 或 nat 任一套被 OUTPUT 引用就算生效。
-    ip6tables -w 2 -t mangle -C OUTPUT -j AGH_V6DNS >/dev/null 2>&1 && return 0
-    ip6tables -w 2 -t nat -C OUTPUT -j ADGUARD6 >/dev/null 2>&1 && return 0
+    ip6tables $IPT_W -t mangle -C OUTPUT -j AGH_V6DNS >/dev/null 2>&1 && return 0
+    ip6tables $IPT_W -t nat -C OUTPUT -j ADGUARD6 >/dev/null 2>&1 && return 0
     return 1
 }
 
