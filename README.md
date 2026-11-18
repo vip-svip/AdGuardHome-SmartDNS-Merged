@@ -153,6 +153,12 @@ AdGuard Home 侧栏里没有这个入口。
 | 装了模块但偶发「域名全部解析不了」，链看着完全正常 | 换 Wi-Fi / AGH 重启 / smartdns 重新绑定端口之后，偶尔会进入「劫持链在、解析全挂」的状态，重建一次链即恢复 | `iptables.sh` 守护循环加解析自愈看门狗：每 ~60s 探一次 `ping www.baidu.com`，连续 3 次失败就强制 `rebuild_rules`（最多 10 分钟一次，避免频繁动链），日志记 `[WARN] 连续 N 次解析探测失败，强制重建 DNS 劫持链。` |
 | dnsenc 的 bootstrap 豁免顺带放过了系统解析器 | bootstrap 写的是 `223.5.5.5:53`，而本机 Wi-Fi 的 `DnsAddresses` 里正好有 `223.5.5.5` —— `--uid-owner 0 -d 223.5.5.5 --dport 53 -j RETURN` 把 netd（uid 0）一起放过了，广告域名直接拿到真实 IP | bootstrap 改成 `180.184.1.1:53`（不在任何系统 DNS 列表里），`-bootstrap` 参数写进 `bin/dnsenc` 的启动命令（`service.sh` / `iptables.sh` / `sd-restart.sh` 三处），链里的豁免跟着改 |
 | 规则导入超过 4MiB 被截断 / 报错 | `internal/home/middlewares.go` 给每个请求体套 `LimitReader`（默认 64KiB，`set_rules` 放宽到 4MiB） | `limitRequestBody` 直接透传；查看规则文件的上限也从 4MiB 提到 64MiB。实测 11.77MiB / 301280 条导入 HTTP 200 |
+| 换到另一台机器（Redmi / Android 13）整栈起不来 | 该 ROM 的 `PATH` 里**连 `nohup` 都没有**，`setsid`/`pgrep`/`netstat`/`mountpoint`/`dirname` 也各自缺；原来 `nohup … &` 的兜底直接失效 | 后台起进程一律 `"$@" </dev/null >/dev/null 2>&1 &`；`pgrep`（读 `/proc/*/stat`）、`netstat`（`ss` → `/proc/net/*`）、`mountpoint`（`/proc/mounts`）、`dirname`/`basename`（纯 shell）全部内置兜底 |
+| 开机瞬间起两个 AdGuardHome 抢端口 | `service.sh` 与 `scripts/iptables.sh` 的守护循环都会「检测不到 AGH 就拉起」，两边同时判定「没在跑」 | 两边共用 `$AGH_DIR/.agh.start.lock` 的 `mkdir` 原子锁，抢不到的一方等 12 秒并二次确认；实测并发启动后仍是 1 个实例、锁无残留 |
+| 首次启动后过滤器自愈空转，`规则总数 0` | `agh_filter_heal()` 在 AGH 的 `/control/*` 路由还没注册完时就 `refresh`，拿到 `404 page not found` | 登录改成轮询（最多 20 次×1s 直到 200），`refresh` 失败重试 3 次并只认含 `"updated"` 的响应 |
+| 老 iptables（1.4.x）上一整条链都建不起来 | 脚本里 50 多处写死 `-w 2`，老版本不接受该参数 | 启动时探测 `IPT_W`（不支持就置空），脚本与管理页 CGI 统一走该变量 |
+| Redmi 首次启动 AGH 直接退出 | `initializing auth module: creating session storage: timeout`（`data/sessions.db` 打不开） | `crash.log` 尾出现 `sessions.db` 时自动删 `data/sessions.db*` 再重启 |
+| 模块管理器一直提示「有新版本」，一装就把本模块覆盖回上游原版 | `module.prop` 里残留 fork 自上游的 `updateJson`，其 `versionCode` 是 `2026111100`，比日期版 `20261119` 大 | 删除 `updateJson=` 整行，模块不再提示任何更新 |
 
 ---
 
@@ -192,6 +198,30 @@ cd module && zip -r ../AdGuardHome-SmartDNS-Merged.zip . -x '*.DS_Store'
    ```
 2. 重启（或手动 `sh /data/adb/modules/AdGuardHome/service.sh`）
 3. 端口：AGH 面板 `40251` · SmartDNS 面板 `6080` · 上游管理 `6081`（仅 `127.0.0.1`）
+
+---
+
+## 多设备兼容（在 OnePlus / ColorOS 与 Redmi / Android 13 上各跑过一遍）
+
+Android 各家的 `PATH` 和内核差异比想象中大，这个模块原来有一批「只在作者那台机上成立」的假设，现在全部改成运行时探测：
+
+| 依赖 | 现状 | 兜底方式 |
+|---|---|---|
+| `iptables -w` | 1.8.x legacy 支持，老 1.4.x 不支持 | 启动探测 `IPT_W`，不支持就置空；脚本 50+ 处与 CGI 统一走该变量 |
+| `pgrep` | 部分精简 ROM 没有 | 读 `/proc/*/stat` 第 4 字段（父进程）、`cmdline`（`-f`）、`comm` |
+| `netstat` / `ss` | 可能都没有 | 依次退到 `/proc/net/{tcp,tcp6,udp,udp6}`，同时识别 `127.0.0.1`、`0.0.0.0`、`::` 三种绑定（只认 `127.0.0.1` 会把绑全网的 6080 / 40251 误判成没监听） |
+| `setsid` / `nohup` | Redmi 实测**两者都没有** | 直接 `"$@" </dev/null >/dev/null 2>&1 &`，不依赖任何一个 |
+| `mountpoint` | 可能没有 | `grep -qs " $1 " /proc/mounts` |
+| `dirname` / `basename` | 可能没有 | 纯 shell：`${1%/*}` / `${1##*/}` |
+| `busybox` | 路径各家不同 | `/data/adb/ksu/bin` → `/data/adb/magisk` → `/system/bin` → `/system/xbin` → `/data/adb/bin` |
+| `curl` | 可能没有 | 只关闭联网自愈（过滤器 / 挂起恢复），DNS 主链路不受影响 |
+| CPU 架构 | 内置二进制只有 arm64 | 非 arm64 直接给出「本机 ABIs 与模块内置二进制不匹配」提示，而不是静默失败 |
+| 时区 | 未设置时 AGH 日志全 UTC | 从 `persist.sys.timezone` 补齐并 export |
+
+另外两处跨设备差异已经写进启动流程：
+
+- **单实例锁**：`service.sh` 和 `scripts/iptables.sh` 的守护循环都会「检测不到 AdGuardHome 就拉起」，开机瞬间两边可能同时判定「没在跑」→ 两个实例抢端口。现在共用 `$AGH_DIR/.agh.start.lock` 的 `mkdir` 原子锁。
+- **IPv6 keep**：`ip6tables` 的 `nat` 表在一部分内核上根本不存在（`Table does not exist`），`TPROXY` 在 `OUTPUT` 也不可用。`v6_dns=auto` 在这种情况下**保持 `keep`（完全不碰 v6）** —— 实测把 `v6:53` 丢掉之后 netd 不会可靠回落 v4（系统 `DnsAddresses` 里 `fe80::1%wlan0` 排在前面），整机域名全解析不了。
 
 ---
 
