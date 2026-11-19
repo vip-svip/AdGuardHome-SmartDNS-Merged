@@ -352,9 +352,10 @@ sd_mounts() {
 agh_rules_guard() {
     _rd="$MODULES_DIR/AdGuardHome/rules"
     [ -d "$_rd" ] || return 0
-    for _f in 反诈.txt 反诈类.txt NoAppDownload.txt myallow.txt; do
-        [ -f "$_rd/$_f" ] || : > "$_rd/$_f" 2>/dev/null
-    done
+    # 只补 yaml 真正引用的那一个（whitelist_filters -> rules/myallow.txt）。
+    # 旧版还会造 反诈.txt / 反诈类.txt / NoAppDownload.txt，但 yaml 里没有任何地方
+    # 引用它们，建出来只是三个 0 字节垃圾文件（反诈规则已经写在 yaml 的 user_rules 里）。
+    [ -f "$_rd/myallow.txt" ] || : > "$_rd/myallow.txt" 2>/dev/null
     return 0
 }
 
@@ -450,7 +451,7 @@ DNSENC_BIN="$BIN_DIR/dnsenc"
 DNSENC_PORT=6054
 # dnsenc 解析 DoH/DoT 主机名用的明文 bootstrap。必须挑一个「系统 DNS 不会用」的地址，
 # 否则 nat 链给它的豁免会把 netd 的查询一起放过去（系统 DNS 里出现过 223.5.5.5 就是这个坑）。
-DNSENC_BOOTSTRAP="180.184.1.1:53"
+DNSENC_BOOTSTRAP="119.28.28.28:53"
 
 dnsenc_running() { pgrep -f "$DNSENC_BIN" >/dev/null 2>&1; }
 

@@ -175,8 +175,10 @@ fi
 # dnsenc 的 bootstrap 明文上游（解析 DoH/DoT 主机名用）。必须选「系统 DNS 不会用」的地址：
 # 它的豁免规则是 root + 该目的 IP + 53，如果这个 IP 同时出现在运营商下发的系统 DNS 里，
 # netd（uid 0）的查询也会一起走豁免、绕过 AGH（历史 bug：曾用 223.5.5.5）。
-DNSENC_BOOTSTRAP="180.184.1.1:53"
+DNSENC_BOOTSTRAP="119.28.28.28:53"
 DNSENC_BOOTSTRAP_IP="${DNSENC_BOOTSTRAP%%:*}"
+# dnsenc 的监听端口，必须和 service.sh 的 DNSENC_PORT 一致
+DNSENC_PORT="${DNSENC_PORT:-6054}"
 
 # ---------------------------------------------------------------
 # redir_port 以 AGH 的 yaml 为准
@@ -660,7 +662,7 @@ rebuild_rules_raw() {
     # 回环豁免：本机解析器（127.0.0.1:53 之类）不出网，劫持它没有意义还会自环
     iptables $IPT_W -t nat -A "$_new" -o lo -j RETURN
     # 精确豁免 dnsenc 的 bootstrap 查询：它用 root 身份问 $DNSENC_BOOTSTRAP 解析 DoH/DoT 主机名。
-    # 目的地址必须挑一个「系统 DNS 不会用」的（这里 180.184.1.1）。早先用 223.5.5.5，
+    # 目的地址必须挑一个「系统 DNS 不会用」的（这里 119.28.28.28，与 service.sh 一致）。
     # 结果运营商给的系统 DNS 里正好有 223.5.5.5，netd 的查询连同豁免一起绕过 AGH。
     iptables $IPT_W -t nat -A "$_new" -m owner --uid-owner 0 -d "$DNSENC_BOOTSTRAP_IP" -p udp --dport 53 -j RETURN
     iptables $IPT_W -t nat -A "$_new" -m owner --uid-owner 0 -d "$DNSENC_BOOTSTRAP_IP" -p tcp --dport 53 -j RETURN
@@ -777,11 +779,36 @@ while true; do
         encn=$(grep -vE '^[[:space:]]*(#|$)' "$SD_DIR/etc/smartdns/encrypted.conf" 2>/dev/null | grep -c . 2>/dev/null)
         [ -n "$encn" ] || encn=0
         if [ "$encn" -gt 0 ]; then
-            if ! pgrep -f "$BIN_DIR/dnsenc" >/dev/null 2>&1; then
-                SSL_CERT_DIR=/system/etc/security/cacerts/ setsid "$BIN_DIR/dnsenc" \
-                    -listen 127.0.0.1:6054 -conf "$SD_DIR/etc/smartdns/encrypted.conf" \
-                    -bootstrap "$DNSENC_BOOTSTRAP" \
-                    >> "$AGH_DIR/dnsenc.log" 2>&1 &
+            _dpid=$(pgrep -f "$BIN_DIR/dnsenc" 2>/dev/null | head -1)
+            # 参数漂移自愈：service.sh 改过 bootstrap 之后，这里 5 秒一轮的守护
+            # 会把带旧参数的老进程一直留着（旧值 180.184.1.1 的 DNS 要 0.3-15.5 秒），
+            # 所以发现命令行里的 -bootstrap 和配置不一致就重启它。
+            if [ -n "$_dpid" ] && ! tr '\0' ' ' < "/proc/$_dpid/cmdline" 2>/dev/null \
+                    | grep -q -- "-bootstrap $DNSENC_BOOTSTRAP"; then
+                pkill -9 -f "$BIN_DIR/dnsenc" 2>/dev/null
+                _i=0
+                while [ "$_i" -lt 20 ]; do
+                    pgrep -f "$BIN_DIR/dnsenc" >/dev/null 2>&1 || break
+                    sleep 0.25; _i=$((_i+1))
+                done
+                _dpid=""
+            fi
+            if [ -z "$_dpid" ]; then
+                # 端口必须真的空出来再启动：service.sh 的 start_dnsenc 也会拉同一个
+                # 进程，两边抢 6054 的结果就是 "bind udp failed"。
+                # 端口已经在听（对方正在启动）就等它，别再多拉一个。
+                _i=0
+                while [ "$_i" -lt 16 ]; do
+                    netstat -lnu 2>/dev/null | grep -q ":$DNSENC_PORT " && break
+                    pgrep -f "$BIN_DIR/dnsenc" >/dev/null 2>&1 && break
+                    sleep 0.5; _i=$((_i+1))
+                done
+                if ! pgrep -f "$BIN_DIR/dnsenc" >/dev/null 2>&1; then
+                    SSL_CERT_DIR=/system/etc/security/cacerts/ setsid "$BIN_DIR/dnsenc" \
+                        -listen "127.0.0.1:$DNSENC_PORT" -conf "$SD_DIR/etc/smartdns/encrypted.conf" \
+                        -bootstrap "$DNSENC_BOOTSTRAP" \
+                        </dev/null >> "$AGH_DIR/dnsenc.log" 2>&1 &
+                fi
             fi
         else
             # 加密上游全部删掉时，转发进程也一起停，别留空转

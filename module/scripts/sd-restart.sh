@@ -143,7 +143,7 @@ stop_dnsenc
 if [ "$encn" -gt 0 ] && [ -x "$AGH_DIR/bin/dnsenc" ]; then
     SSL_CERT_DIR=/system/etc/security/cacerts/ setsid "$AGH_DIR/bin/dnsenc" \
         -listen 127.0.0.1:6054 -conf "$ENC" \
-        -bootstrap "${DNSENC_BOOTSTRAP:-180.184.1.1:53}" >> "$AGH_DIR/dnsenc.log" 2>&1 &
+        -bootstrap "${DNSENC_BOOTSTRAP:-119.28.28.28:53}" >> "$AGH_DIR/dnsenc.log" 2>&1 &
     _i=0
     while [ "$_i" -lt 12 ]; do
         port_listening 6054 udp && break

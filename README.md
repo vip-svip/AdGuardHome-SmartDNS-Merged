@@ -99,42 +99,73 @@ AdGuard Home 侧栏里没有这个入口。
 
 ---
 
-## 实测延迟（设备 18e1870，每项 3 轮）
+## 实测延迟（Redmi / MIUI 14 / Android 13 / 3GB，2026-11-19）
 
-### 加密上游（可用，按平均延迟排序）
+用户视角只看 AdGuard Home 自己记的 `elapsedMs`（`/control/querylog`，一次正常使用后的 800 条）：
 
-| 上游 | 平均 | 最慢 |
+| 类型 | n | median | p90 | p99 | max | mean |
+|---|---|---|---|---|---|---|
+| A | 565 | **0.5 ms** | 2.2 | 208.6 | 2151.4 | 11.2 |
+| AAAA | 235 | **0.7 ms** | 3.3 | 48.4 | 515.3 | 5.2 |
+| 全部 | 800 | **0.5 ms** | 2.8 | 208.2 | 2151.4 | 9.4 |
+
+端到端（`curl -w %{time_namelookup}`）：
+
+- 热查（`www.baidu.com` ×10）：**4.3 – 6.1 ms**
+- 冷查（10 个从未问过的域名，先 `POST /control/cache_clear` + 删 `smartdns.cache` + 重启 smartdns）：
+  `cpan.org 1.149s` / `ctan.org 0.168s` / `suckless.org 0.467s` / `cat-v.org 0.758s` /
+  `plan9foundation.org 0.677s` / `tuhs.org 0.598s` / `nokia.com 0.104s`，其余 3 个 NXDOMAIN（0）
+
+**冷查那 0.1–1.2 秒不是本模块的。** 交叉 A/B（每组换一批全新域名、每次清持久缓存并重启实例、A/B 顺序对调）：
+
+| 对比 | 先测组（冷） | 后测组（已热） |
 |---|---|---|
-| `doh https://223.5.5.5/dns-query` | **105 ms** | 110 |
-| `doh https://223.6.6.6/dns-query` | 107 ms | 108 |
-| `dot 223.6.6.6` | 108 ms | 119 |
-| `dot 223.5.5.5` | 110 ms | 120 |
-| `doq dns.alidns.com` | 115 ms | 123 |
-| `doh https://dns.alidns.com/dns-query` | 134 ms | 141 |
-| `dot dns.alidns.com` | 138 ms | 157 |
-| `doh https://doh.360.cn/dns-query` | 138 ms | 145 |
-| `doh https://1.12.12.12/dns-query` | 178 ms | 240 |
-| `dot 120.53.53.53` | 183 ms | 251 |
-| `dot dot.pub` | 244 ms | 276 |
-| `doh https://doh.pub/dns-query` | 250 ms | 298 |
+| 走本机 6053 vs 裸问 223.5.5.5 | 6053 **1534 ms** 均值 | 裸 223 **57 ms** |
+| 反序（同一批域名换顺序） | 裸 223 **1187 ms** 均值 | 6053 **28 ms** |
 
-### 不可用（已从预设里剔除）
+同一批域名**谁先测谁慢** —— 慢的是上游 ISP 递归对生僻域名的首次解析，本机栈只占 1.3 倍以内。
 
-`dns.google` 6.1s · `cloudflare-dns.com` 2.5s · `1dot1dot1dot1.cloudflare-dns.com` 8.3s ·
-`dns.adguard-dns.com` DoQ 5.0s / DoT 15.9s · `dot dns.qq.com` 6.0s · `doh dns.qq.com` EOF ·
-`dot dns.360.cn` 8.1s · `dot 119.29.29.29` 3.0s · `doq 1.12.12.12` 3.0s · `dot 9.9.9.9` 3.0s ·
-`doq dot.pub` 4.0s · `doq dns.360.cn` 4.1s · `i.pdns.cn`（DoT/DoH）4.1s ·
-`dot.dnspod.cn` / `dns.dnspod.cn` 无 A 记录
+被反复怀疑、实测排掉的三件事（都是交叉 A/B，不是单次抽样）：
 
-### 明文链路（smartdns `response-mode fastest-response`，3 条上游）
+| 变量 | 结论 |
+|---|---|
+| `speed-check-mode ping` vs `none` | 噪声大于差异（真实站点三组交叉：谁先测谁慢；两边都热时 ping **38.4 ms** / none **38.6 ms**）。保留 `ping`：它给 IP 做质量挑选，热查零代价 |
+| 明文上游 3 个 vs 2 个 | 同条件差 2.5 倍，全是域名差异，上游数量不是决定性变量 |
+| 全局上游再加两条 IP 直连 DoH | 冷 310.5 → 267.9、热 174.3 → 81.9，同样被顺序污染主导，**没有稳定收益**（所以没加进全局） |
 
-| 场景 | median | p90 | max |
-|---|---|---|---|
-| 冷查 | 69.5 ms | 110.1 | 178.1 |
-| 热查 | 5.3 ms | 7.7 | 10.1 |
+私有网段的 PTR 现在由 `smartdns/adblock.conf` 本地秒回（`10.in-addr.arpa` / `168.192` / `172.16-31` / `254.169` / `d.f.ip6.arpa` / `8-b.e.f.ip6.arpa`），
+实测 17–30 ms → 7–15 ms，收益只有 10–20 ms；公网 PTR 不受影响。
 
-上游数量是延迟的关键：上游越多，NXDOMAIN 类查询要等的答复越多，尾部越长。
-所以明文只保留 3 个（`223.5.5.5` / `223.6.6.6` / `119.29.29.29`），加密上游单独成组。
+---
+
+## 加密上游改成 IP 直连（省掉 bootstrap）
+
+`smartdns/etc/smartdns/encrypted.conf` 现在只有两行：
+
+```
+doh https://223.5.5.5/dns-query
+doh https://1.12.12.12/dns-query
+```
+
+理由：IP 直连不需要先解析主机名，于是完全不依赖 bootstrap。`dnsenc -probe -probe-name www.python.org` 实测：
+
+| 写法 | bootstrap | 首查 |
+|---|---|---|
+| `doh https://dns.alidns.com/dns-query` | `180.184.1.1` | **6386 ms** |
+| `doh https://dns.alidns.com/dns-query` | `223.5.5.5` | 133 ms |
+| `doh https://1.12.12.12/dns-query` | 不需要 | **180 ms** |
+| `doh https://223.5.5.5/dns-query` | 不需要 | 314 ms |
+
+改前 enc 组（`domain-rules.conf` 里 18 条 `-nameserver enc` 的域名）被这个 bootstrap 拖死，实测
+`www.python.org` **1700 ms**（普通链路 260）/ `www.rust-lang.org` **4880**（390）/
+`www.cloudflare.com` **1090**（260）/ `www.github.com` **720**（210）；
+改后 6054 稳态 `www.python.org` 160–460 ms、`www.github.com` 120–130 ms。
+
+**bootstrap 这个 IP 必须在三处完全一致，改一处就会形成 nat 环**：
+`service.sh` 的 `DNSENC_BOOTSTRAP`、`scripts/iptables.sh` 的 `DNSENC_BOOTSTRAP`（同时用 `DNSENC_BOOTSTRAP_IP`
+建 `--uid-owner 0 -d <IP> --dport 53 -j RETURN` 豁免）、`bin/AdGuardHome.yaml` 的 `bootstrap_dns`。
+2026-11 起统一为 `119.28.28.28`（实测 50/80 ms）。原来的 `180.184.1.1` 已废：
+ICMP 只有 28 ms，但 DNS 查询要 0.3–15.5 秒 —— **能 ping 通不代表 DNS 可用**。
 
 ---
 
@@ -151,7 +182,7 @@ AdGuard Home 侧栏里没有这个入口。
 | **装了模块但 DNS 根本不走 AGH**，querylog 里只有 `127.0.0.1` 的 PTR、没有任何真实客户端 | nat 链顶部有一条 `-m owner --uid-owner 0 -j RETURN`。Android 的系统解析器 `dnsproxyd` 就跑在 `netd`（uid 0）里 → 所有 App 的查询在进 AGH 之前被豁免 | 删掉「uid 0 全豁免」，只保留 SmartDNS（uid 9999）、回环（`-o lo`）、dnsenc bootstrap 的精确豁免（root 仅 `223.5.5.5:53`）。修完后 AGH 立刻能看到真实客户端与真实域名查询 |
 | 运营商 IPv6 DNS（`2408:8888::8` 之类）绕过过滤 | 本机内核没有 `ip6tables` 的 `nat` 表（`Table does not exist`），`TPROXY` 在 `OUTPUT` 也报 `Invalid argument`，v6 的 53 端口从来没有被处理 | 新增 `v6_dns=auto\|redirect\|drop\|keep`：`auto` 先试 `modprobe ip6table_nat` 走 nat REDIRECT；**拿不到 nat 表时保持 `keep`（不碰 v6）**，因为实测把 v6:53 丢掉之后 netd 不会可靠回落 v4（系统 DNS 里 `fe80::1%wlan0` 排在前面），整机域名全解析不了。`drop` 保留给「确认本网络有可用 v4 DNS」的用户手动开。v6 链同样支持 VPN 让路与 `proxy` 豁免 |
 | 装了模块但偶发「域名全部解析不了」，链看着完全正常 | 换 Wi-Fi / AGH 重启 / smartdns 重新绑定端口之后，偶尔会进入「劫持链在、解析全挂」的状态，重建一次链即恢复 | `iptables.sh` 守护循环加解析自愈看门狗：每 ~60s 探一次 `ping www.baidu.com`，连续 3 次失败就强制 `rebuild_rules`（最多 10 分钟一次，避免频繁动链），日志记 `[WARN] 连续 N 次解析探测失败，强制重建 DNS 劫持链。` |
-| dnsenc 的 bootstrap 豁免顺带放过了系统解析器 | bootstrap 写的是 `223.5.5.5:53`，而本机 Wi-Fi 的 `DnsAddresses` 里正好有 `223.5.5.5` —— `--uid-owner 0 -d 223.5.5.5 --dport 53 -j RETURN` 把 netd（uid 0）一起放过了，广告域名直接拿到真实 IP | bootstrap 改成 `180.184.1.1:53`（不在任何系统 DNS 列表里），`-bootstrap` 参数写进 `bin/dnsenc` 的启动命令（`service.sh` / `iptables.sh` / `sd-restart.sh` 三处），链里的豁免跟着改 |
+| dnsenc 的 bootstrap 豁免顺带放过了系统解析器 | bootstrap 写的是 `223.5.5.5:53`，而本机 Wi-Fi 的 `DnsAddresses` 里正好有 `223.5.5.5` —— `--uid-owner 0 -d 223.5.5.5 --dport 53 -j RETURN` 把 netd（uid 0）一起放过了，广告域名直接拿到真实 IP | bootstrap 改成运营商 DNS 之外的地址（2026-11 起为 `119.28.28.28:53`，原 `180.184.1.1` 已废：DNS 要 0.3–15.5 秒），`-bootstrap` 参数写进 `bin/dnsenc` 的启动命令（`service.sh` / `iptables.sh` / `sd-restart.sh` 三处），链里的豁免跟着改 |
 | 规则导入超过 4MiB 被截断 / 报错 | `internal/home/middlewares.go` 给每个请求体套 `LimitReader`（默认 64KiB，`set_rules` 放宽到 4MiB） | `limitRequestBody` 直接透传；查看规则文件的上限也从 4MiB 提到 64MiB。实测 11.77MiB / 301280 条导入 HTTP 200 |
 | 换到另一台机器（Redmi / Android 13）整栈起不来 | 该 ROM 的 `PATH` 里**连 `nohup` 都没有**，`setsid`/`pgrep`/`netstat`/`mountpoint`/`dirname` 也各自缺；原来 `nohup … &` 的兜底直接失效 | 后台起进程一律 `"$@" </dev/null >/dev/null 2>&1 &`；`pgrep`（读 `/proc/*/stat`）、`netstat`（`ss` → `/proc/net/*`）、`mountpoint`（`/proc/mounts`）、`dirname`/`basename`（纯 shell）全部内置兜底 |
 | 开机瞬间起两个 AdGuardHome 抢端口 | `service.sh` 与 `scripts/iptables.sh` 的守护循环都会「检测不到 AGH 就拉起」，两边同时判定「没在跑」 | 两边共用 `$AGH_DIR/.agh.start.lock` 的 `mkdir` 原子锁，抢不到的一方等 12 秒并二次确认；实测并发启动后仍是 1 个实例、锁无残留 |
