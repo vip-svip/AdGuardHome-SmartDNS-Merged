@@ -493,10 +493,8 @@ v6nat_ok() {
 #   1. 开机时解析栈还没预热，第一次 ping 必失败 → 误判成「只提供 v6 DNS」；
 #   2. www.baidu.com 这类热域名走 DNS 缓存，drop 后仍能解析 → 误判成「可以 drop」；
 #   3. 结果 keep / drop 来回横跳（日志里几秒钟翻一次）。
-# 现在 auto 是确定性的：有 ip6tables nat 表就 redirect，没有就 drop。
-# 真机 A/B 实测（24 域名 ping，keep / drop / auto 各 2 轮）全 0 失败，
-# 说明本网络 drop 掉 v6:53 后 netd 会正常回落 v4 劫持链。
-# 纯 v6 网络（无任何 v4 DNS 可用）请手动 v6_dns=keep。
+# 现在 auto 是确定性的：有 ip6tables nat 表就 redirect，没有就 keep（见 v6_effective）。
+# 想强行拦 v6 DNS 的用户手动 v6_dns=drop，并自担解析失败风险。
 # ---------------------------------------------------------------
 
 # 实际生效的 v6 模式
