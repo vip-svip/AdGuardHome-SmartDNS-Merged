@@ -825,6 +825,14 @@ fi
     agh_filter_heal
 ) </dev/null >>"$MAIN_LOG" 2>&1 &
 
+# 修复 dnsproxyd socket 权限：init 创建的 /dev/socket/dnsproxyd 默认 srw-rw---- root:inet，
+# uid 2000(shell) 不在 inet 组 → EACCES → DNS 解析直接失败（curl 等 shell 工具全断）。
+# chmod 666 让所有用户都能连 dnsproxyd，DNS 查询经 netd → nat REDIRECT → AGH 正常解析。
+if [ -e /dev/socket/dnsproxyd ]; then
+    chmod 666 /dev/socket/dnsproxyd 2>/dev/null
+    [ "$lang" = "zh" ] && log "dnsproxyd socket 权限已修复（666）。" || log "dnsproxyd socket permission fixed (666)."
+fi
+
 # 过滤器缓存为空时自动重新下载（全新安装 / 跨版本升级后必备，否则没有拦截效果）
 agh_rules_guard
 

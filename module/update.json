@@ -1,6 +1,6 @@
 {
-  "version": "20261122",
-  "versionCode": 20261122,
-  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/20261122/AdGuardHome-SmartDNS-Merged-20261122.zip",
-  "changelog": "[20261122] 新增 SNI(TLS/HTTP) 层拦截：内置于 AdGuard Home（fork snifilter，思路源自 nora-adblock，作者桉桉），仪表盘 DNS 设置页独立开关，开启后解析 TLS ClientHello 的 SNI 命中过滤列表即断流（RST），与 DNS 层共用同一份名单，fail-open 不断网。"
+  "version": "20261123",
+  "versionCode": 20261123,
+  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/20261123/AdGuardHome-SmartDNS-Merged-20261123.zip",
+  "changelog": "[20261123] 三层拦截默认生效：DNS(53 NXDOMAIN) + HTTP Host 头(80 RST) + TLS SNI(443/8443 RST) + QUIC DROP(UDP 443 强制 TCP 回落)，共用同一份过滤列表；VPN 应用(BoxProxy)自动豁免；fail-open 不断网；修复 dnsproxyd 权限与 uid 9999 豁免两个 DNS 断网根因。"
 }

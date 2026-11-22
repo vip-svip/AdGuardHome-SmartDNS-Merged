@@ -577,11 +577,11 @@ v6_cleanup() {
     fi
 }
 
-# 和 v4 一致的豁免：SmartDNS（uid 9999）+ 回环，proxy 模式下再加隧道出接口
-# 与 VPN 应用 uid，避免把 VPN 自己的 DNS 也吞掉。
-# 不再豁免 uid 0：netd 就是 uid 0，豁免它等于让系统解析器绕过 AGH。
+# v6 豁免：回环 + proxy 模式下隧道出接口与 VPN 应用 uid
+# 不再豁免 uid 9999：Android 13 的 netd/dnsproxyd 是 uid 9999，
+# 豁免它等于让系统解析器绕过 AGH；路由器 DNS 挂了就全断。
+# 去掉后 netd 的 DNS 查询被 REDIRECT 到 AGH，由 AGH → smartdns → dnsenc → DoH 解析。
 v6_exempt() {
-    ip6tables $IPT_W "$@" -m owner --uid-owner 9999 -j RETURN 2>/dev/null
     ip6tables $IPT_W "$@" -o lo -j RETURN 2>/dev/null
     [ "$vpn_compat" = proxy ] || return 0
     for _o in tun tap ppp utun wg ipsec; do
@@ -797,8 +797,8 @@ rebuild_rules_raw() {
         return 0
     fi
 
-    # uid 9999 (SmartDNS) 豁免：它的明文上游查询要直出，不能被自己劫持
-    iptables $IPT_W -t nat -A "$_new" -m owner --uid-owner 9999 -j RETURN
+    # 不再豁免 uid 9999：netd/dnsproxyd 是 uid 9999，豁免它会让系统 DNS 绕过 AGH
+    # SmartDNS 的上游是 127.0.0.1:6054（dnsenc，回环），不走 nat OUTPUT 的 53 端口
     # 回环豁免：本机解析器（127.0.0.1:53 之类）不出网，劫持它没有意义还会自环
     iptables $IPT_W -t nat -A "$_new" -o lo -j RETURN
     # 精确豁免 dnsenc 的 bootstrap 查询：它用 root 身份问 $DNSENC_BOOTSTRAP 解析 DoH/DoT 主机名。
@@ -971,7 +971,7 @@ while true; do
     [ -n "$V4C" ] || V4C=ADGUARD
     if expect_hijack; then
         jump_present || need_fix=1
-        iptables $IPT_W -t nat -C "$V4C" -m owner --uid-owner 9999 -j RETURN 2>/dev/null || need_fix=1
+        # uid 9999 豁免已移除，不再检查
         iptables $IPT_W -t nat -C "$V4C" -p udp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
         iptables $IPT_W -t nat -C "$V4C" -p tcp --dport 53 -j REDIRECT --to-ports "$redir_port" 2>/dev/null || need_fix=1
     else
