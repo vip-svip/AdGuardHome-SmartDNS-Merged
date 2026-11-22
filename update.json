@@ -1,0 +1,6 @@
+{
+  "version": "20261123",
+  "versionCode": 20261123,
+  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/20261123/AdGuardHome-SmartDNS-Merged-20261123.zip",
+  "changelog": "HTTP/SNI/QUIC 三层拦截：HTTP Host 头解析 + QUIC DROP + BoxProxy 共存 + 默认生效"
+}
