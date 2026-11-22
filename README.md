@@ -324,74 +324,67 @@ Android 各家的 `PATH` 和内核差异比想象中大，这个模块原来有�
 
 ---
 
-## SNI 拦截（TLS ClientHello 层，fork 内置 snifilter）
+## HTTP/SNI/QUIC 三层拦截（fork 内置 snifilter + HTTP Host 解析）
 
-DNS 层拦得住域名解析，但很多 SDK 会用 IP 直连 + 自建 DNS（或预解析缓存），绕过 AGH 的 53 劫持。
-SNI 拦截补上这一层：在 TCP 443/8443 握手时解析 TLS ClientHello 里的 SNI（Server Name Indication），
-命中过滤列表就 RST 断流，与 DNS 层共用同一份 `rules/拦截列表.txt`（ABP `||domain^` 语法）。
+本模块的 AdGuard Home 是定制 fork（liuzq2002/AdguardHome-Mod codex/client-v2 分支），内置 `internal/snifilter` 包，实现三层拦截：
 
-**底层实现 = AdGuard Home fork（`liuzq2002/AdguardHome-Mod`，分支 `codex/client-v2`）内置的 `internal/snifilter`**，
-思路源自 [nora-adblock](https://github.com/ZhangAnAn0106/nora-adblock)（作者：桉桉，MIT-style，保留署名）。
-本模块只做集成与模块侧的链管理，没有另起守护进程，也没有移植 nora 的界面/白名单/规则文件——
-开关做在 AGH 仪表盘 DNS 设置页（`设置 → DNS 设置 → SNI filtering`），底层就是 AGH 自己。
+### 拦截层级
 
-### 工作原理
+| 层 | 端口 | 机制 | 效果 |
+|---|---|---|---|
+| DNS | 53 | AGH 域名过滤（NXDOMAIN） | 命中过滤列表的域名直接解析失败 |
+| HTTP Host | 80 | snifilter 解析 HTTP 请求 Host 头 | 命中过滤列表的 Host → TCP RST 断流 |
+| TLS SNI | 443/8443 | snifilter 解析 TLS ClientHello SNI | 命中过滤列表的 SNI → TCP RST 断流 |
+| QUIC | UDP 443 | iptables DROP | 丢 QUIC 包强制回落 TCP（让 SNI 层接管） |
+
+### 默认生效
+
+无需开关，`sni_filter.enabled: true` 默认开启。有规则就拦截、无规则就放行，与 DNS 层共用同一份过滤列表（OISD/URLHaus/内置拦截列表）。
+
+### 模块侧链管理（iptables.sh 守护）
+
+守护进程每 5 秒读 AGH yaml `sni_filter` 块，动态挂/拆 filter 表 `AGH_SNI` 链（≤8s 同步）：
 
 ```
-应用 TCP 443 握手包
-  → filter OUTPUT -j AGH_SNI
-    → -o lo / uid 0 / 纯 ACK → RETURN（豁免本机回环与 root 工具流量）
-    → -p tcp --dport 443/8443 -j NFQUEUE --queue-num 7 --queue-bypass
-      → AGH snifilter 解析 ClientHello SNI
-        → 命中过滤列表：双向 RST + 后续包 NF_DROP
-        → 未命中：NF_ACCEPT（连接正常建立）
+filter OUTPUT → AGH_SNI 链:
+  -o lo RETURN                              # 本地流量放行
+  -m owner --uid-owner 0 RETURN             # root 流量豁免（AGH/dnsenc 自身）
+  -m owner --uid-owner <vpn_uid> RETURN     # VPN/代理应用豁免（BoxProxy 共存）
+  -p tcp --tcp-flags ALL ACK RETURN         # 纯 ACK 放行（减少入队）
+  -p udp --dport 443 -j DROP                # QUIC 拦截（drop_quic=true 时）
+  -p tcp --dport 80 -j NFQUEUE --queue-num 7 --queue-bypass    # HTTP Host
+  -p tcp --dport 443 -j NFQUEUE --queue-num 7 --queue-bypass   # TLS SNI
+  -p tcp --dport 8443 -j NFQUEUE --queue-num 7 --queue-bypass  # TLS SNI
 ```
 
-- **仪表盘开关**：`POST /control/sni/set {"enabled":true}` → AGH `confModifier.Apply` 一次完成
-  写盘 + 启停 snifilter 队列，**不重启 AGH**。`GET /control/sni/status` 返回
-  `{enabled, active, queue_num, ports, drop_quic}`。
-- **模块侧链管理**：`scripts/iptables.sh` 守护循环每 5 秒读 yaml 的 `sni_filter.enabled / queue_num / ports`，
-  与 `.sni_state` 比对，变化就重建 `AGH_SNI` 链（iptables + ip6tables 的 filter 表 OUTPUT）。
-  开关在仪表盘一拨，模块 ≤8 秒内自动挂/拆链，不需要重启设备。
-- **fail-open**：所有 NFQUEUE 规则带 `--queue-bypass`，AGH 进程不在时流量直通（不会断网）。
-  最危险的反而是这个「静默放行」状态——队列不存在但规则在，SNI 等于失效。
-  `iptables.sh` 守护检测到 AGH 重启后会自动重新挂链 + 绑定队列。
+`--queue-bypass` = fail-open：AGH 进程被杀时流量直通（不会断网）。
 
-### 已知局限（fork snifilter 的设计上限）
+### BoxProxy / VPN 共存
+
+`AGH_SNI` 链自动豁免 `config.prop` 里 `vpn_apps` 列出的应用的 uid（`-m owner --uid-owner N RETURN`），VPN 应用自身的 443/80 流量不经过 snifilter。
+
+### 局限
 
 | 局限 | 说明 |
 |---|---|
-| **ECH 加密 SNI** | TLS Encrypted Client Hello 把 SNI 加密了，snifilter 看不到真实域名，只能放行。这是协议层限制，不是 bug。 |
-| **QUIC / HTTP3** | UDP 443 的 QUIC 握手不走 TCP NFQUEUE 链。`sni_filter.drop_quic` 只是描述字段，实际是否丢 QUIC 由模块脚本决定（本模块默认不丢，避免误伤）。 |
-| **connbytes 不可用** | 部分内核（如本测试机 5.10.168-android12）没编 `CONFIG_NETFILTER_XT_MATCH_CONNBYTES`，nora 原版用 `connbytes 1:8` 只送连接前 8 包的优化做不了。fork snifilter 的解法是**全包入队 + 守护内流表**：首包判定一次，后续包查流表 O(1) 裁决，流量大时多花的 CPU 可控。 |
-| **流表限额** | maxFlows 16384、每流握手 32 KiB、总预算 16 MiB、乱序 4 段/4 KiB ×256 流、flowTTL 1 min/30 s 清理。超过限额的连接会被放行（不卡死）。 |
-| **RST 依赖 raw socket** | rp_filter 严格时 RST 可能挂起；本模块未特殊处理，依赖内核默认宽松策略。 |
-| **root 流量豁免** | AGH_SNI 链第三条 `-m owner --uid-owner 0 -j RETURN` 豁免 uid 0，避免 root 工具的 443 流量被排队（否则 curl/wget 等诊断工具会被自己拦）。普通 App（uid != 0）正常走 SNI。 |
+| ECH 加密 SNI | TLS Encrypted ClientHello 加密的 SNI 不可见，无法拦截 |
+| QUIC/HTTP3 | QUIC 被 DROP 而非解析（强制 TCP 回落）；如果目标只支持 QUIC 则连接失败 |
+| root 流量豁免 | uid 0 的流量被豁免（AGH/dnsenc 自身需要访问 443） |
+| 流表限额 | maxFlows 16384 / 每流握手 32KiB / 总预算 16MiB / flowTTL 1min |
 
-### 真机实测（Redmi 23076RA4BC / MIUI 14 / Android 13 / 3GB，2026-11-22）
+### 真机验证（Redmi 6c8dc14781cf / MIUI 14 / Android 13 / 3GB）
 
-| 状态 | `v1.cnzz.com`（CN 统计域名，在拦截列表） | `adservice.google.com` | `www.baidu.com` |
+| 测试目标 | HTTP(80) | HTTPS(443) | 备注 |
 |---|---|---|---|
-| SNI ON（uid 2000） | `Connection reset by peer`（TCP 已连上，TLS 握手被切） | RST | 200 |
-| SNI OFF | 404（TLS 正常，服务器响应） | 404 | 200 |
-| 杀 AGH（fail-open） | 404（queue-bypass 直通） | — | 200 |
+| v1.cnzz.com（拦截列表） | **RST**（Connection reset by peer） | **RST**（000） | HTTP Host + SNI 双层命中 |
+| www.baidu.com（放行） | 200 | 200 | 正常访问 |
+| QUIC UDP 443 | — | — | DROP 规则在链 |
 
-- 判据：`curl --resolve <域名>:443:<CN_IP>` 绕过 DNS 层（避免 netd 缓存干扰），用 uid 2000（shell）跑（uid 0 会被 SNI 链豁免）。
-- `000` = 被断（RST 或 DNS NXDOMAIN）；非 `000` = TLS 握手完成。
-- AGH `querylog` 里 SNI 拦截的 reason = 12（FilteredSNI），client_v2 显示「已阻止（SNI）」。
+### 两个 mksh 兼容 bug（已修复）
 
-### 这轮踩的两个真 bug（都是 mksh 行为差异）
+1. **mksh 参数展开 `|` 是交替符**：`${var#1|}` 不剥、`%%|*` 全剥光 → NFQUEUE 行报 invalid port/service。改用 `awk -F'|'` 解析。
+2. **`pgrep -f "$0"` 守护互斥竞态**：子壳同 cmdline 被数进去 → 误判已有守护静默 exit。改用 pid 文件 + `/proc/<pid>/cmdline` 核对。
 
-1. **mksh 参数展开里 `|` 是交替符**：`_want="1|7|443,8443"`，
-   `${_want#1|}` 剥不掉（pattern `1|` = 「"1" 或 ""」，最短匹配是空），
-   `%%|*` 全剥光（pattern `|*` = 「"|..." 或 "*"」→ 匹配一切），
-   `#*|` 也不剥。结果 `sni_chain_up` 收到 `q=[]`、`pl=整个want串`，
-   NFQUEUE 行报 `invalid port/service '1|7|443'` + `bad queue-num`，被 `2>/dev/null` 吞掉。
-   **修法**：解析改 `awk -F'|'`（不碰 shell pattern）。case 模式里 `1\|*` 的 `\|` 是转义字面量，本来就能匹配，不用动。
-2. **守护互斥 `pgrep -f "$0"` 有竞态**：命令替换子壳与本守护同 cmdline 会被数进去；
-   `pkill` 杀守护后短暂存活的孤儿子壳（同 cmdline）会让紧接着的重启误判「已有守护」→ 静默 exit；
-   外部 wrapper（`timeout` / `sh -x`）也会被算进去。**修法**：改 pid 文件 + `/proc/<pid>/cmdline` 核对，
-   不再依赖 pgrep 计数。
 
 ## 致谢
 
