@@ -2,7 +2,7 @@
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 SRC = r"F:\BUG\AdguardHome-Magisk\Adguardhome"
-OUT = r"F:\BUG\AdGuardHome-SmartDNS-Merged-20261122.zip"
+OUT = r"F:\BUG\AdGuardHome-SmartDNS-Merged-20261123.zip"
 
 SKIP_DIRS = ("rules/subscriptions/", "bin/data/")
 SKIP_FILES = ("iptables-DROP规则.txt",)
