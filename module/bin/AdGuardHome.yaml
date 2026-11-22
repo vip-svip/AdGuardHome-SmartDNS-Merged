@@ -1,4 +1,4 @@
-http:
+﻿http:
   pprof:
     port: 62761
     enabled: false
@@ -1440,12 +1440,7 @@ filtering:
   parental_enabled: false
   safebrowsing_enabled: false
   protection_enabled: true
-sni_filter:
-  ports:
-    - 443
-    - 8443
-  queue_num: 7
-  drop_quic: false
+
 clients:
   runtime_sources:
     whois: true
