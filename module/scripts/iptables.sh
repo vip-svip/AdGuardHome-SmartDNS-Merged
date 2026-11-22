@@ -215,7 +215,21 @@ V6ONLY=0
 [ "$1" = "--v6" ] && V6ONLY=1
 
 # 已有守护在跑就退出（--once / --v6 例外，它们就是要跟守护并存跑一次）
-[ $ONCE -eq 0 ] && [ $V6ONLY -eq 0 ] && [ "$(pgrep -f "$0" | wc -l)" -gt 1 ] && exit
+# 已有守护在跑就退出（--once / --v6 例外，它们就是要跟守护并存跑一次）。
+# 不用 pgrep -f "$0"：命令替换子壳与本守护同 cmdline 会被数进去；
+# pkill 守护后短暂存活的孤儿子壳、外部 wrapper（timeout/sh -x）同样造成误判
+# -> 重启竞态下新守护静默退出（实测 r3a/r3g）。改 pid 文件 + /proc 核对。
+_daemon_pidf="$AGH_DIR/.ipt_daemon.pid"
+if [ $ONCE -eq 0 ] && [ $V6ONLY -eq 0 ]; then
+    _opid="$(cat "$_daemon_pidf" 2>/dev/null)"
+    if [ -n "$_opid" ] && [ "$_opid" != "$$" ] && [ -d "/proc/$_opid" ]; then
+        _ocmd="$(tr '\0' ' ' < "/proc/$_opid/cmdline" 2>/dev/null)"
+        case "$_ocmd" in
+            *iptables.sh*) exit ;;   # 真守护还活着
+        esac
+    fi
+    echo "$$" > "$_daemon_pidf" 2>/dev/null
+fi
 
 # 检测Adguardhome是否存活
 agh_running() {
@@ -620,6 +634,114 @@ apply_v6() {
 }
 
 
+# ---------------------------------------------------------------
+# SNI(TLS/HTTP) 层拦截链（AGH fork 内置 snifilter，仪表盘开关驱动）
+# AGH yaml sni_filter.enabled=true 时在 filter OUTPUT 挂 AGH_SNI：
+#   lo RETURN -> uid 0 RETURN（AGH/dnsenc 自身流量）-> 纯 ACK RETURN
+#   -> 各端口 NFQUEUE --queue-num N --queue-bypass
+# --queue-bypass：AGH 不在/队列关闭时流量直通（fail-open，绝不断网）。
+# 开关状态记在 $AGH_DIR/.sni_state，变化或链丢失时才动 iptables。
+# ---------------------------------------------------------------
+SNI_CHAIN=AGH_SNI
+SNI_STATE="$AGH_DIR/.sni_state"
+SNI_LOG="$AGH_DIR/sni_err.log"
+
+sni_yaml_val() {
+    # $1 = enabled | queue_num
+    awk -v key="$1" '
+        /^sni_filter:/ { f = 1; next }
+        f && /^[^[:space:]]/ { f = 0 }
+        f && $1 == key ":" { print $2; exit }
+    ' "$YAML" 2>/dev/null
+}
+
+sni_yaml_ports() {
+    awk '
+        /^sni_filter:/ { f = 1; next }
+        f && /^[^[:space:]]/ { f = 0 }
+        f && $1 == "-" { sub(/^[[:space:]]*-[[:space:]]*/, ""); print $1 }
+    ' "$YAML" 2>/dev/null | tr '\n' ',' | sed 's/,$//'
+}
+
+sni_want() {
+    # 想要的状态串："0" 或 "1|queue|ports"
+    _e="$(sni_yaml_val enabled)"
+    if [ "$_e" != "true" ]; then
+        echo "0"
+        return 0
+    fi
+    _q="$(sni_yaml_val queue_num)"
+    [ -n "$_q" ] || _q=7
+    _p="$(sni_yaml_ports)"
+    [ -n "$_p" ] || _p="443,8443"
+    echo "1|$_q|$_p"
+}
+
+sni_chain_down() {
+    for _ipt in iptables ip6tables; do
+        "$_ipt" $IPT_W -t filter -D OUTPUT -j "$SNI_CHAIN" 2>/dev/null
+        "$_ipt" $IPT_W -t filter -D OUTPUT -j "$SNI_CHAIN" 2>/dev/null
+        "$_ipt" $IPT_W -t filter -F "$SNI_CHAIN" 2>/dev/null
+        "$_ipt" $IPT_W -t filter -X "$SNI_CHAIN" 2>/dev/null
+    done
+}
+
+sni_chain_up() {
+    # $1 = queue_num, $2 = ports（逗号分隔）
+    _q="$1"
+    _pl="$(echo "$2" | tr ',' ' ')"
+    echo "$(date '+%F %T') sni_chain_up q=[$_q] pl=[$_pl] iptw=[$IPT_W]" >>"$SNI_LOG"
+    sni_chain_down
+    for _ipt in iptables ip6tables; do
+        "$_ipt" $IPT_W -t filter -N "$SNI_CHAIN" 2>/dev/null
+        "$_ipt" $IPT_W -t filter -F "$SNI_CHAIN" 2>/dev/null
+        "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -o lo -j RETURN 2>/dev/null
+        "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -m owner --uid-owner 0 -j RETURN 2>/dev/null
+        "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p tcp --tcp-flags ALL ACK -j RETURN 2>/dev/null
+        for _pt in $_pl; do
+            "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p tcp --dport "$_pt" -j NFQUEUE --queue-num "$_q" --queue-bypass 2>>"$SNI_LOG" || echo "$(date '+%F %T') $_ipt NFQUEUE FAIL dport=[$_pt] q=[$_q] rc=$?" >>"$SNI_LOG"
+        done
+        "$_ipt" $IPT_W -t filter -C OUTPUT -j "$SNI_CHAIN" 2>/dev/null || \
+            "$_ipt" $IPT_W -t filter -I OUTPUT 1 -j "$SNI_CHAIN" 2>/dev/null
+    done
+}
+
+sni_sync_apply() {
+    _want="$(sni_want)"
+    echo "$(date '+%F %T') sni_sync_apply want=[$_want]" >>"$SNI_LOG"
+    case "$_want" in
+        0)
+            sni_chain_down
+            echo "0" > "$SNI_STATE" 2>/dev/null
+            log_vpn "SNI 拦截已关闭：AGH_SNI 链已拆除。"
+            ;;
+        1\|*)
+            # mksh 的参数展开里 | 是交替符（${var#1|} 剥不掉、%%|* 全剥光），
+            # 改用 awk -F 按字面 | 分列（实测 mksh 最小复现确认）。
+            _q="$(echo "$_want" | awk -F'|' '{print $2}')"
+            _p="$(echo "$_want" | awk -F'|' '{print $3}')"
+            sni_chain_up "$_q" "$_p"
+            echo "$_want" > "$SNI_STATE" 2>/dev/null
+            log_vpn "SNI 拦截已开启：filter OUTPUT -> AGH_SNI（NFQUEUE $_q，端口 $_p，fail-open）。"
+            ;;
+    esac
+}
+
+sni_sync() {
+    _want="$(sni_want)"
+    _cur="$(cat "$SNI_STATE" 2>/dev/null)"
+    if [ "$_want" = "$_cur" ]; then
+        # 状态没变也补一次存在性检查：链可能被重装/别的脚本清掉
+        case "$_cur" in
+            1\|*)
+                iptables $IPT_W -t filter -L "$SNI_CHAIN" >/dev/null 2>&1 || sni_sync_apply
+                ;;
+        esac
+        return 0
+    fi
+    sni_sync_apply
+}
+
 rebuild_rules_raw() {
     # ---- 第一步：把所有需要的信息先算出来，别夹在链操作中间 ----
     # （vpn_uids 要走 stat / pm 缓存，算它的时候链还是完好的）
@@ -868,6 +990,9 @@ while true; do
         last_agh=$cur_agh
         last_vpnstate="$vpnstate"
     fi
+
+    # SNI 开关同步（仪表盘 sni_filter.enabled 驱动，5 秒一轮，状态不变不动 iptables）
+    sni_sync
 
     # ---- 解析自愈看门狗 ----
     # 真机上偶尔会进入「链看着没问题、但系统解析全挂」的状态；实测把劫持链

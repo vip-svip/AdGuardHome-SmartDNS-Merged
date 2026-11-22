@@ -65,7 +65,15 @@ ip6tables -w 2 -t nat -X ADGUARD 2>/dev/null
 ip6tables -w 2 -t filter -D OUTPUT -j AGH_HARDEN6 2>/dev/null
 ip6tables -w 2 -t filter -F AGH_HARDEN6 2>/dev/null
 ip6tables -w 2 -t filter -X AGH_HARDEN6 2>/dev/null
-log "  已清理 iptables 规则链"
+# AGH_SNI（AGH fork snifilter，filter 表 OUTPUT，仪表盘开关）
+iptables -w 2 -t filter -D OUTPUT -j AGH_SNI 2>/dev/null
+iptables -w 2 -t filter -D OUTPUT -j AGH_SNI 2>/dev/null
+iptables -w 2 -t filter -F AGH_SNI 2>/dev/null
+iptables -w 2 -t filter -X AGH_SNI 2>/dev/null
+ip6tables -w 2 -t filter -D OUTPUT -j AGH_SNI 2>/dev/null
+ip6tables -w 2 -t filter -D OUTPUT -j AGH_SNI 2>/dev/null
+ip6tables -w 2 -t filter -F AGH_SNI 2>/dev/null
+ip6tables -w 2 -t filter -X AGH_SNI 2>/dev/nulllog "  已清理 iptables 规则链"
 
 # ---------- 5. 恢复被 NoAdsService 改过的系统文件 ----------
 if [ -f "$AGH_DIR/scripts/NoAdsService.sh" ]; then
