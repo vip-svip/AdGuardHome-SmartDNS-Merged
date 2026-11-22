@@ -663,6 +663,18 @@ sni_yaml_ports() {
     ' "$YAML" 2>/dev/null | tr '\n' ',' | sed 's/,$//'
 }
 
+# sni_ports_effective: yaml ports ∪ {80,443,8443}，保证 HTTP Host 端口恒在
+sni_ports_effective() {
+    _y="$(sni_yaml_ports)"
+    _out="80,443,8443"
+    for _pt in $(echo "$_y" | tr "," " "); do
+        [ -n "$_pt" ] || continue
+        case ",$_out," in *",$_pt,"*) continue ;; esac
+        _out="$_out,$_pt"
+    done
+    echo "$_out"
+}
+
 sni_want() {
     # 想要的状态串："0" 或 "1|queue|ports"
     _e="$(sni_yaml_val enabled)"
@@ -672,9 +684,9 @@ sni_want() {
     fi
     _q="$(sni_yaml_val queue_num)"
     [ -n "$_q" ] || _q=7
-    _p="$(sni_yaml_ports)"
-    [ -n "$_p" ] || _p="443,8443"
-    echo "1|$_q|$_p"
+    _p="$(sni_ports_effective)"
+    _dq="$(sni_yaml_val drop_quic)"
+    echo "1|$_q|$_p|$_dq"
 }
 
 sni_chain_down() {
@@ -687,9 +699,10 @@ sni_chain_down() {
 }
 
 sni_chain_up() {
-    # $1 = queue_num, $2 = ports（逗号分隔）
+    # $1 = queue_num, $2 = ports（逗号分隔）, $3 = drop_quic(1/0)
     _q="$1"
     _pl="$(echo "$2" | tr ',' ' ')"
+    _dq="$3"
     echo "$(date '+%F %T') sni_chain_up q=[$_q] pl=[$_pl] iptw=[$IPT_W]" >>"$SNI_LOG"
     sni_chain_down
     for _ipt in iptables ip6tables; do
@@ -697,7 +710,13 @@ sni_chain_up() {
         "$_ipt" $IPT_W -t filter -F "$SNI_CHAIN" 2>/dev/null
         "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -o lo -j RETURN 2>/dev/null
         "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -m owner --uid-owner 0 -j RETURN 2>/dev/null
+        # 豁免 VPN/代理应用（BoxProxy 共存）
+        for _vu in $(vpn_uids); do
+            "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -m owner --uid-owner "$_vu" -j RETURN 2>/dev/null
+        done
         "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p tcp --tcp-flags ALL ACK -j RETURN 2>/dev/null
+        # QUIC 拦截：丢 UDP 443 强制回落 TCP（SNI 层才能解析）
+        [ "$_dq" = "true" ] && "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p udp --dport 443 -j DROP 2>/dev/null
         for _pt in $_pl; do
             "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p tcp --dport "$_pt" -j NFQUEUE --queue-num "$_q" --queue-bypass 2>>"$SNI_LOG" || echo "$(date '+%F %T') $_ipt NFQUEUE FAIL dport=[$_pt] q=[$_q] rc=$?" >>"$SNI_LOG"
         done
@@ -720,9 +739,10 @@ sni_sync_apply() {
             # 改用 awk -F 按字面 | 分列（实测 mksh 最小复现确认）。
             _q="$(echo "$_want" | awk -F'|' '{print $2}')"
             _p="$(echo "$_want" | awk -F'|' '{print $3}')"
-            sni_chain_up "$_q" "$_p"
+            _dq="$(echo "$_want" | awk -F'|' '{print $4}')"
+            sni_chain_up "$_q" "$_p" "$_dq"
             echo "$_want" > "$SNI_STATE" 2>/dev/null
-            log_vpn "SNI 拦截已开启：filter OUTPUT -> AGH_SNI（NFQUEUE $_q，端口 $_p，fail-open）。"
+            log_vpn "SNI 拦截已开启：filter OUTPUT -> AGH_SNI（NFQUEUE $_q，端口 $_p，drop_quic=$_dq，fail-open）。"
             ;;
     esac
 }
