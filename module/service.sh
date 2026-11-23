@@ -734,6 +734,20 @@ agh_filter_heal() {
                            || log "Registered the bundled blocklist: $_bl"
         _st=$(curl -s -m 15 -b "$_ck" "http://127.0.0.1:$_port/control/filtering/status" 2>/dev/null)
     fi
+    # 模块内置的本地过滤器（OPPO 实测同款）：没注册就自动补注册
+    # 色情网站/水印/反诈三件套/NoAppDownload/adaway/antiadblock
+    for _bf in 色情网站.txt 水印.txt 反诈.txt 反诈类.txt 反诈和广告.txt NoAppDownload.txt adaway_hosts.txt antiadblockfilters.txt; do
+        _bfp="$ADGPATH/rules/$_bf"
+        [ -f "$_bfp" ] || continue
+        if ! printf '%s' "$_st" | grep -qF "$_bf"; then
+            curl -s -m 120 -b "$_ck" -H "Content-Type: application/json" \
+                 -d "{\"data\":{\"name\":\"${_bf%.txt}\",\"url\":\"$_bfp\",\"enabled\":true},\"url\":\"$_bfp\",\"whitelist\":false}" \
+                 "http://127.0.0.1:$_port/control/filtering/add_url" >/dev/null 2>&1
+            [ "$lang" = "zh" ] && log "已注册模块内置过滤器：$_bf" \
+                               || log "Registered the bundled filter: $_bf"
+            _st=$(curl -s -m 15 -b "$_ck" "http://127.0.0.1:$_port/control/filtering/status" 2>/dev/null)
+        fi
+    done
     _total=$(printf '%s' "$_st" | tr ',' '\n' | awk -F: '/rules_count/{gsub(/[^0-9]/,"",$2); s+=$2} END{print s+0}')
     if [ "${_total:-0}" -eq 0 ]; then
         _ids=$(awk '/^filters:/{f=1;next} f&&/^[^[:space:]-]/{exit} f&&/^[[:space:]]+id:/{gsub(/[^0-9]/,"",$2); printf "%s,", $2}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null | sed 's/,$//')
