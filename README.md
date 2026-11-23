@@ -194,6 +194,19 @@ ICMP 只有 28 ms，但 DNS 查询要 0.3–15.5 秒 —— **能 ping 通不代
 
 ---
 
+## 上游服务器管理（面板内置）
+
+从 20261124 起，SmartDNS 上游管理页直接做进 AdGuard Home 面板：侧栏点「上游服务器管理」
+走面板内路由 `/upstream_manage`（iframe 嵌 busybox httpd :6081 的 upstream-manage.html，
+地址按浏览器当前 hostname 动态生成，手机从局域网 IP 打开面板也能加载），不再外跳独立页。
+侧栏里 SmartDNS 面板（:6080）外链保留。
+
+同时修复了路由切换卡顿：面板根组件原先把路由 children 包在 `<Show>` 门控里，
+导航时第一次显示的还是上一个页面、要手动刷新才对；现在路由 children 常驻挂载、
+只用 CSS 门控显隐，切换即时渲染。
+
+---
+
 ## 构建
 
 ```bash
