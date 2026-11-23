@@ -593,8 +593,9 @@ link_rules_dirs
 export SSL_CERT_DIR="/system/etc/security/cacerts/"
 
 # ---------------------------------------------------------------
-# 上游服务器管理小服务（SmartDNS 网页「上游服务器」页上的「+ 添加上游服务器」）
-# busybox httpd + CGI，只监听 127.0.0.1:6081
+# 上游服务器管理小服务（SmartDNS 侧栏「Upstream Manage」页面）
+# busybox httpd + CGI：监听 0.0.0.0:6081，手机从局域网 IP 打开面板时
+# 页面 fetch 的 hostname:6081 才能连上（只绑 127.0.0.1 会 Failed to fetch）。
 # ---------------------------------------------------------------
 find_busybox() {
     for b in /data/adb/ksu/bin/busybox /data/adb/magisk/busybox \
@@ -607,13 +608,16 @@ find_busybox() {
 start_webui() {
     [ -d "$WEBUI_DIR/cgi-bin" ] || return 0
     chmod 755 "$WEBUI_DIR/cgi-bin"/* 2>/dev/null
-    pgrep -f 'httpd -p 127.0.0.1:6081' >/dev/null 2>&1 && return 0
+    pgrep -f 'httpd -p 0.0.0.0:6081' >/dev/null 2>&1 && return 0
+    # 老版本可能还绑着 127.0.0.1:6081，先停掉再换监听地址
+    pkill -f 'httpd -p 127.0.0.1:6081' 2>/dev/null
+    sleep 1
     BB=$(find_busybox)
     if [ -z "$BB" ]; then
         [ "$lang" = "zh" ] && log "未找到 busybox，上游服务器管理页不可用（可用 sd-restart.sh 手动管理）。" || log "busybox not found, upstream manager disabled."
         return 0
     fi
-    "$BB" httpd -p 127.0.0.1:6081 -h "$WEBUI_DIR" </dev/null >/dev/null 2>&1
+    "$BB" httpd -p 0.0.0.0:6081 -h "$WEBUI_DIR" </dev/null >/dev/null 2>&1
     return 0
 }
 start_webui

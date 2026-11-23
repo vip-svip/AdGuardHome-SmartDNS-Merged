@@ -210,14 +210,17 @@
 (function () {
   // 同源优先：从 6081 直接打开（或端口转发）时走相对路径，避免写死端口。
   // 只有从 SmartDNS 的 6080 wwwroot 打开时才回退到绝对地址。
+  // 同源优先：6081 直接打开走相对路径；6080 打开时用当前 hostname 拼 6081，
+  // 手机从局域网 IP 访问时不再误连到 127.0.0.1（浏览器自己）。
+  var HOST = location.hostname;
   var API = (location.protocol === 'http:' && location.port !== '6080')
     ? (location.origin + '/cgi-bin/upstream')
-    : 'http://127.0.0.1:6081/cgi-bin/upstream';
+    : (location.protocol + '//' + HOST + ':6081/cgi-bin/upstream');
   var $ = function (id) { return document.getElementById(id); };
 
   // 返回：优先 history.back（从 SmartDNS 上游服务器页点进来时最自然），
   // 没有历史（直接打开本页 / 新标签页）就跳回 SmartDNS 上游服务器页面。
-  var SD_UPSTREAM = 'http://127.0.0.1:6080/dashboard/upstream-servers.html';
+  var SD_UPSTREAM = location.protocol + '//' + HOST + ':6080/dashboard/upstream-servers.html';
   function goBack() {
     var canBack = false;
     try {

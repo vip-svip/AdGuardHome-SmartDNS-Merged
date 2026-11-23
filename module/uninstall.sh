@@ -36,6 +36,7 @@ for _round in 1 2 3; do
     kill_pat "$AGH_DIR/scripts/ProxyConfig.sh"
     kill_pat "$AGH_DIR/scripts/sd-restart.sh"
     kill_pat "httpd -p 127.0.0.1:6081"
+    kill_pat "httpd -p 0.0.0.0:6081"
     kill_pat "/usr/local/lib/smartdns/smartdns"
     [ "$FOUND" = "0" ] && break
     sleep 1
