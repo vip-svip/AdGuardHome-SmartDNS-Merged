@@ -43,3 +43,8 @@ v6_dns=auto
 # 在面板里改过密码的话，记得同步这里。
 sd_user=root
 sd_pass=root
+
+# 面板访问防护：1（默认）= AGH 40251 / smartdns 6080 / 上游管理 6081 三个面板
+# 只允许本机与 wlan0 所在局域网网段访问，其他来源 iptables DROP；
+# 0 = 关闭防护（恢复局域网裸奔，不建议）。改动由守护循环 5 秒内自动生效。
+panel_lan_only=1

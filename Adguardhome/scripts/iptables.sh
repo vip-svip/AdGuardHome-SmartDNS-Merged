@@ -788,6 +788,24 @@ sni_sync() {
 }
 
 rebuild_rules_raw() {
+    # ---- 第零步：面板防护（幂等，每次 rebuild 先校准一遍）----
+    # AGH 40251 / smartdns 6080 / busybox httpd 6081 都绑 0.0.0.0/[::]，
+    # 局域网裸奔。INPUT 链只放行本机（lo）与局域网网段（wlan0 动态取），
+    # 其他来源 DROP；config.prop panel_lan_only=0 可整体关闭防护。
+    webui_guard() {
+        [ "$panel_lan_only" != "0" ] || return 0
+        iptables $IPT_W -N AGH_WEBUI 2>/dev/null
+        iptables $IPT_W -F AGH_WEBUI
+        _lan=$(ip -4 addr show wlan0 2>/dev/null | sed -n 's/.*inet \([0-9.\/]*\) .*/\1/p' | head -1)
+        iptables $IPT_W -A AGH_WEBUI -i lo -j RETURN
+        [ -n "$_lan" ] && iptables $IPT_W -A AGH_WEBUI -s "$_lan" -j RETURN
+        for _pt in 40251 6080 6081; do
+            iptables $IPT_W -A AGH_WEBUI -p tcp --dport $_pt -j DROP
+        done
+        iptables $IPT_W -C INPUT -j AGH_WEBUI 2>/dev/null || iptables $IPT_W -A INPUT -j AGH_WEBUI
+    }
+    webui_guard
+
     # ---- 第一步：把所有需要的信息先算出来，别夹在链操作中间 ----
     # （vpn_uids 要走 stat / pm 缓存，算它的时候链还是完好的）
     _vifs=$(vpn_ifaces)
