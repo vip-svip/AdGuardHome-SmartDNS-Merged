@@ -801,6 +801,15 @@ rebuild_rules_raw() {
     # SmartDNS 的上游是 127.0.0.1:6054（dnsenc，回环），不走 nat OUTPUT 的 53 端口
     # 回环豁免：本机解析器（127.0.0.1:53 之类）不出网，劫持它没有意义还会自环
     iptables $IPT_W -t nat -A "$_new" -o lo -j RETURN
+    # 防回环：SmartDNS(chroot, uid 9999) 的明文上游（servers.conf 里的 server <ip>）
+    # 发往公网 53 会被下面 REDIRECT 劫回 AGH -> smartdns -> 再出站 -> 死环 SERVFAIL。
+    # 豁免条件收得很窄：uid 必须是 9999（SmartDNS 专用，netd 之外没别的 uid 9999 常驻
+    # 解析器），目标必须精确等于 servers.conf 里配置的上游 IP —— netd 发往路由器
+    # 或其它 DNS 的查询照常被 REDIRECT，不放大绕过面。
+    for _sdip in $(sed -n 's/^server \([0-9.]*\)$/\1/p' "$AGH_DIR/smartdns/etc/smartdns/servers.conf" 2>/dev/null | sort -u); do
+        iptables $IPT_W -t nat -A "$_new" -d "$_sdip/32" -m owner --uid-owner 9999 -p udp --dport 53 -j RETURN 2>/dev/null
+        iptables $IPT_W -t nat -A "$_new" -d "$_sdip/32" -m owner --uid-owner 9999 -p tcp --dport 53 -j RETURN 2>/dev/null
+    done
     # 精确豁免 dnsenc 的 bootstrap 查询：它用 root 身份问 $DNSENC_BOOTSTRAP 解析 DoH/DoT 主机名。
     # 目的地址必须挑一个「系统 DNS 不会用」的（这里 119.28.28.28，与 service.sh 一致）。
     # 结果运营商给的系统 DNS 里正好有 223.5.5.5，netd 的查询连同豁免一起绕过 AGH。
