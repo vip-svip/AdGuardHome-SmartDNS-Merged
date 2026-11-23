@@ -748,6 +748,14 @@ agh_filter_heal() {
             _st=$(curl -s -m 15 -b "$_ck" "http://127.0.0.1:$_port/control/filtering/status" 2>/dev/null)
         fi
     done
+    # 内置过滤器自动注册后，AGH 用 URL 生成的名字是 "List <id>"，
+    # 直接改 yaml 里的 name，仪表盘显示中文名
+    _yf="$BIN_DIR/AdGuardHome.yaml"
+    for _nm in 色情网站 水印 反诈 反诈类 反诈和广告 NoAppDownload adaway_hosts antiadblockfilters 拦截列表; do
+        _lid=$(awk '/rules\/'"$_nm"'\.txt$/{getline; getline; if ($1=="id:") print $2}' "$_yf" 2>/dev/null)
+        [ -n "$_lid" ] || continue
+        sed -i "s/name: List $_lid/name: $_nm/" "$_yf" 2>/dev/null
+    done
     _total=$(printf '%s' "$_st" | tr ',' '\n' | awk -F: '/rules_count/{gsub(/[^0-9]/,"",$2); s+=$2} END{print s+0}')
     if [ "${_total:-0}" -eq 0 ]; then
         _ids=$(awk '/^filters:/{f=1;next} f&&/^[^[:space:]-]/{exit} f&&/^[[:space:]]+id:/{gsub(/[^0-9]/,"",$2); printf "%s,", $2}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null | sed 's/,$//')
