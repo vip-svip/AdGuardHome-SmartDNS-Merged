@@ -272,6 +272,10 @@ start_agh() {
     fi
     "$BIN_DIR/AdGuardHome" --no-check-update >/dev/null 2>&1 &
     sleep 0.3
+    # 永不 OOM：ColorOS 低内存清理对后台进程下手，AGH 优先级顶到 -1000
+    for _p in $(pidof AdGuardHome 2>/dev/null); do
+        echo -1000 > "/proc/$_p/oom_score_adj" 2>/dev/null
+    done
     rm -rf "$_lk" 2>/dev/null
 }
 
@@ -956,6 +960,7 @@ if [ $ONCE -eq 1 ] || [ $V6ONLY -eq 1 ]; then
 fi
 
 while true; do
+    date +%s > "$AGH_DIR/.daemon_hb" 2>/dev/null
     . "$AGH_DIR/scripts/config.prop"
     [ -n "$vpn_compat" ] || vpn_compat=auto
     [ -n "$vpn_apps" ] || vpn_apps=""
