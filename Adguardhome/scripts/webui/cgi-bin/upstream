@@ -1,0 +1,1021 @@
+#!/system/bin/sh
+# ---------------------------------------------------------------
+# 设备兼容：iptables 的 -w（xtables 锁）参数
+# legacy 1.8.x 支持 -w，老的 1.4.x 不支持，nft 后端行为也不一样。带不被支持的
+# 参数会直接报错、整条链建不起来，所以探测一次，不支持就去掉。
+# ---------------------------------------------------------------
+IPT_W="-w 2"
+iptables $IPT_W -t nat -S OUTPUT >/dev/null 2>&1 || IPT_W=""
+ip6tables $IPT_W -t mangle -S OUTPUT >/dev/null 2>&1 || IPT_W=""
+
+# ---------------------------------------------------------------
+# 设备兼容：busybox httpd 的 CGI 环境 PATH 很短，pgrep 不一定可见；
+# 缺了就用 /proc 兜底（否则「重启/刷新」类 action 会误判服务没在跑）。
+# ---------------------------------------------------------------
+if ! command -v dirname >/dev/null 2>&1; then
+    dirname() { printf '%s\n' "${1%/*}"; }
+fi
+if ! command -v basename >/dev/null 2>&1; then
+    basename() { _s="${1%/}"; printf '%s\n' "${_s##*/}"; }
+fi
+if ! command -v pgrep >/dev/null 2>&1; then
+    pgrep() {
+        _m="$1"; shift
+        case "$_m" in
+            -P) _pp="$1"
+                for _d in /proc/[0-9]*; do
+                    _ppid=$(awk '{print $4}' "$_d/stat" 2>/dev/null) || continue
+                    [ "$_ppid" = "$_pp" ] && echo "${_d#/proc/}"
+                done ;;
+            -f) for _d in /proc/[0-9]*; do
+                    [ -r "$_d/cmdline" ] || continue
+                    tr '\0' ' ' < "$_d/cmdline" 2>/dev/null | grep -q -- "$1" && echo "${_d#/proc/}"
+                done ;;
+            *)  for _d in /proc/[0-9]*; do
+                    [ "$(cat "$_d/comm" 2>/dev/null)" = "$1" ] && echo "${_d#/proc/}"
+                done ;;
+        esac
+    }
+fi
+# ============================================================
+# SmartDNS 上游服务器管理 CGI —— busybox httpd @ 127.0.0.1:6081
+#
+#   GET /cgi-bin/upstream?action=list
+#   GET /cgi-bin/upstream?action=add&srv=<urlencoded>
+#   GET /cgi-bin/upstream?action=del&srv=<urlencoded>
+#   GET /cgi-bin/upstream?action=restart
+#   GET /cgi-bin/upstream?action=flush
+#
+# 支持的上游写法：
+#   1.1.1.1            1.1.1.1:53         dns.google
+#   tls://dns.google   https://dns.google/dns-query
+#   udp://8.8.8.8      tcp://8.8.8.8
+#   server 1.1.1.1    server-tls 1.1.1.1  （直接写指令也可）
+# ============================================================
+SD=/data/adb/agh/smartdns
+SRV="$SD/etc/smartdns/servers.conf"
+RESTART=/data/adb/agh/scripts/sd-restart.sh
+[ -f "$RESTART" ] || RESTART=/data/adb/modules/AdGuardHome/scripts/sd-restart.sh
+
+# ---- 加密上游（DoH / DoH3 / DoT / DoQ / DNSCrypt）----
+ENC="$SD/etc/smartdns/encrypted.conf"
+ENC_SRV="$SD/etc/smartdns/enc-servers.conf"
+RULES="$SD/etc/smartdns/domain-rules.conf"
+CONF="$SD/etc/smartdns/smartdns.conf"
+DNSENC=/data/adb/agh/bin/dnsenc
+ENCPORT=6054
+
+# ---- VPN 共存 ----
+CFG=/data/adb/agh/scripts/config.prop
+[ -f "$CFG" ] || CFG=/data/adb/modules/AdGuardHome/scripts/config.prop
+IPT=/data/adb/agh/scripts/iptables.sh
+[ -f "$IPT" ] || IPT=/data/adb/modules/AdGuardHome/scripts/iptables.sh
+VPN_PKGS_DEFAULT="com.github.metacubex.clash.meta com.github.kr328.clash com.follow.clash \
+com.nebula.clashmi com.getsurfboard com.v2ray.ang com.v2ray.ang.fdroid \
+io.nekohasekai.sagernet com.hxtunnel.vpn com.netrino.v2rayapp dev.minios.tgwsproxy"
+
+# pm 的 uid 查询很慢（单次约 0.9s），一次会话里只跑一次，落文件复用
+PM_UID_CACHE="$AGH_DIR/.pm_uids"
+
+hdr() {
+    echo "Content-Type: application/json; charset=utf-8"
+    echo "Access-Control-Allow-Origin: *"
+    echo "Cache-Control: no-store"
+    echo ""
+}
+
+# URL 解码：awk 逐字节，避开 mksh/busybox printf '\xHH' 的不一致
+urldecode() {
+    printf '%s' "$1" | awk '
+    function hv(ch,   p) {
+        ch = tolower(ch)
+        p = index("0123456789abcdef", ch)
+        if (p == 0) return -1
+        return p - 1
+    }
+    {
+        s = $0; out = ""
+        for (i = 1; i <= length(s); i++) {
+            c = substr(s, i, 1)
+            if (c == "+") { out = out " "; continue }
+            if (c == "%" && i + 2 <= length(s)) {
+                h1 = hv(substr(s, i + 1, 1)); h2 = hv(substr(s, i + 2, 1))
+                if (h1 >= 0 && h2 >= 0) {
+                    out = out sprintf("%c", h1 * 16 + h2)
+                    i += 2
+                    continue
+                }
+            }
+            out = out c
+        }
+        printf "%s", out
+    }'
+}
+
+json_esc() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\r\n'
+}
+
+trim() {
+    printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*/ /g'
+}
+
+list_lines() {
+    f="$1"
+    [ -f "$f" ] || return 0
+    grep -E '^[[:space:]]*(server|server-tls|server-https|server-udp|server-tcp)[[:space:]]' "$f" 2>/dev/null \
+      | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*/ /g'
+}
+
+count_lines() {
+    n=$(list_lines "$SRV" | grep -c . 2>/dev/null)
+    [ -n "$n" ] || n=0
+    printf '%s' "$n"
+}
+
+# $1 = 可选 warn 文案
+emit_list() {
+    warn="$1"
+    arr=$(list_lines "$SRV" | awk '
+        function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+        { if (n++) printf ","; printf "\"%s\"", esc($0) }
+    ')
+    printf '{"ok":true,"list":[%s],"file":"%s","count":%s' "$arr" "$(json_esc "$SRV")" "$(count_lines)"
+    if [ -n "$warn" ]; then
+        printf ',"warn":"%s"' "$(json_esc "$warn")"
+    fi
+    printf '}'
+}
+
+fail() {
+    hdr
+    printf '{"ok":false,"error":"%s"}' "$(json_esc "$1")"
+    exit 0
+}
+
+# 合法地址：IPv4[:port]、[IPv6][:port]、域名[:port]（含 dns.google / localhost）、
+# 可选 scheme、可选 /path、可选 #SNI。只校验字符集，不做可解析性检查。
+valid_addr() {
+    a="$1"
+    [ -n "$a" ] || return 1
+    [ ${#a} -le 220 ] || return 1
+    case "$a" in
+        *[[:space:]]*) return 1 ;;
+    esac
+    printf '%s' "$a" | grep -Eq '^([A-Za-z][A-Za-z0-9+.-]*://)?(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)(:[0-9]{1,5})?(/[A-Za-z0-9._~%/?=+&:@!$()*,;-]*)?(#[A-Za-z0-9._-]+)?$' || return 1
+    return 0
+}
+
+# scheme → smartdns 指令前缀
+scheme_prefix() {
+    case "$1" in
+        tls://*)        printf 'server-tls' ;;
+        https://*|h3://*|quic://*) printf 'server-https' ;;
+        tcp://*)        printf 'server-tcp' ;;
+        udp://*)        printf 'server' ;;
+        *)              printf '' ;;
+    esac
+}
+
+strip_scheme() {
+    case "$1" in
+        *://*) printf '%s' "${1#*://}" ;;
+        *)     printf '%s' "$1" ;;
+    esac
+}
+
+# 把任意写法归一化成一整行 smartdns 指令，add 与 del 共用同一套规则：
+#   1.1.1.1                    -> server 1.1.1.1
+#   tls://dns.google           -> server-tls dns.google
+#   https://dns.google/q       -> server-https dns.google/q
+#   server 1.1.1.1             -> server 1.1.1.1
+#   server-tls 1.1.1.1         -> server-tls 1.1.1.1
+#   server-udp 1.1.1.1         -> server 1.1.1.1   (smartdns 没有 server-udp)
+canon_line() {
+    raw=$(trim "$1")
+    [ -n "$raw" ] || return 1
+    cmd=""
+    rest="$raw"
+    first=${raw%%[[:space:]]*}
+    case "$first" in
+        server|server-tcp|server-tls|server-https|server-udp)
+            cmd="$first"
+            rest=$(trim "${raw#"$first"}")
+            ;;
+    esac
+    case "$rest" in
+        *://*)
+            _p=$(scheme_prefix "$rest")
+            if [ -n "$_p" ]; then
+                cmd="$_p"
+                rest=$(strip_scheme "$rest")
+            fi
+            ;;
+    esac
+    case "$cmd" in
+        ""|server-udp) cmd="server" ;;
+    esac
+    printf '%s %s' "$cmd" "$(trim "$rest")"
+}
+
+# 只取地址部分（用于 del 的兜底匹配：不管前缀是什么）
+addr_only() {
+    l=$(canon_line "$1")
+    case "$l" in
+        "server "*)      printf '%s' "${l#server }" ;;
+        "server-tls "*)  printf '%s' "${l#server-tls }" ;;
+        "server-https "*) printf '%s' "${l#server-https }" ;;
+        "server-tcp "*)  printf '%s' "${l#server-tcp }" ;;
+        *)               printf '%s' "$l" ;;
+    esac
+}
+
+# 兼容历史 bug 拼出来的 "server A server B"（只拆以 server 开头的行，注释绝不碰）
+selfheal_srv() {
+    [ -f "$SRV" ] || return 0
+    grep -qE '^[[:space:]]*server[[:space:]].*server[[:space:]]' "$SRV" 2>/dev/null || return 0
+    awk '
+    /^[[:space:]]*server[[:space:]]/ {
+        n = split($0, parts, /server[[:space:]]+/)
+        if (n > 2) {
+            for (i = 2; i <= n; i++) {
+                a = parts[i]
+                gsub(/^[[:space:]]+/, "", a)
+                gsub(/[[:space:]]+$/, "", a)
+                if (a != "") printf "server %s\n", a
+            }
+            next
+        }
+    }
+    { print }
+    ' "$SRV" > "$SRV.fix.$$" 2>/dev/null && cat "$SRV.fix.$$" > "$SRV" 2>/dev/null
+    rm -f "$SRV.fix.$$" 2>/dev/null
+}
+
+
+# ============================================================
+# 加密上游：dnsenc 在 127.0.0.1:6054 把加密 DNS 转成本地普通 DNS，
+# smartdns 当普通上游引用它（构建无 TLS，所以必须这样中转）。
+# ============================================================
+enc_lines() {
+    [ -f "$ENC" ] || return 0
+    grep -vE '^[[:space:]]*(#|$)' "$ENC" 2>/dev/null \
+      | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*/ /g'
+}
+
+enc_count() {
+    n=$(enc_lines | grep -c . 2>/dev/null)
+    [ -n "$n" ] || n=0
+    printf '%s' "$n"
+}
+
+# 归一化：dot dns.alidns.com / doh https://x/q / https://x/q / dns.google
+enc_canon() {
+    raw=$(trim "$1")
+    [ -n "$raw" ] || return 1
+    first=${raw%%[[:space:]]*}
+    lower=$(printf '%s' "$first" | tr 'A-Z' 'a-z')
+    case "$lower" in
+        doh|doh3|h3|dot|tls|doq|quic|dnscrypt|sdns)
+            rest=$(trim "${raw#"$first"}")
+            [ -n "$rest" ] || return 1
+            case "$lower" in
+                tls)      lower=dot ;;
+                quic)     lower=doq ;;
+                dnscrypt) lower=sdns ;;
+            esac
+            printf '%s %s' "$lower" "$rest"
+            return 0
+            ;;
+    esac
+    case "$raw" in
+        *://*)
+            sch=${raw%%://*}
+            case "$sch" in
+                https)  printf 'doh %s'  "$raw" ;;
+                h3)     printf 'doh3 %s' "$raw" ;;
+                tls)    printf 'dot %s'  "$raw" ;;
+                quic)   printf 'doq %s'  "$raw" ;;
+                sdns)   printf 'sdns %s' "$raw" ;;
+                *)      return 1 ;;
+            esac
+            return 0
+            ;;
+    esac
+    # 裸地址按 DoT 处理（853，写法最短）
+    printf 'dot %s' "$raw"
+}
+
+enc_addr() {
+    l=$(enc_canon "$1")
+    [ -n "$l" ] || return 1
+    case "$l" in
+        *" "*) printf '%s' "${l#* }" ;;
+        *)     printf '%s' "$l" ;;
+    esac
+}
+
+enc_dnsenc_running() { pgrep -f "$DNSENC" >/dev/null 2>&1; }
+
+# 写 enc-servers.conf + 保证 smartdns.conf 引用它
+enc_sync() {
+    mkdir -p "$(dirname "$ENC_SRV")" 2>/dev/null
+    n=$(enc_count)
+    {
+        echo "# 由管理页自动生成，请勿手改。"
+        if [ "$n" -gt 0 ]; then
+            echo "server 127.0.0.1:$ENCPORT -group enc -exclude-default-group"
+        fi
+    } > "$ENC_SRV" 2>/dev/null
+    if [ -f "$CONF" ] && ! grep -q 'enc-servers\.conf' "$CONF" 2>/dev/null; then
+        echo "conf-file /etc/smartdns/enc-servers.conf" >> "$CONF"
+    fi
+    if [ -f "$CONF" ] && ! grep -q 'domain-rules\.conf' "$CONF" 2>/dev/null; then
+        echo "conf-file /etc/smartdns/domain-rules.conf" >> "$CONF"
+    fi
+    rules_comment_guard
+}
+
+enc_start() {
+    [ -x "$DNSENC" ] || return 1
+    [ "$(enc_count)" -gt 0 ] || return 1
+    pkill -9 -f "$DNSENC" 2>/dev/null
+    sleep 1
+    SSL_CERT_DIR=/system/etc/security/cacerts/ setsid "$DNSENC" \
+        -listen "127.0.0.1:$ENCPORT" -conf "$ENC" >> /data/adb/agh/dnsenc.log 2>&1 &
+    sleep 2
+    enc_dnsenc_running
+}
+
+# ---------------- 按域名分流（domain-rules） ----------------
+# 每行：domain-rules /域名/ -nameserver enc|default  或  -address #
+rules_lines() {
+    [ -f "$RULES" ] || return 0
+    grep -E '^[[:space:]]*domain-rules[[:space:]]' "$RULES" 2>/dev/null
+}
+
+rules_count() {
+    n=$(rules_lines | grep -c . 2>/dev/null)
+    [ -n "$n" ] || n=0
+    printf '%s' "$n"
+}
+
+# 没有可用加密上游时，把走 enc 的规则注释掉（避免引用不存在的组）
+rules_comment_guard() {
+    [ -f "$RULES" ] || return 0
+    n=$(enc_count)
+    if [ "$n" -gt 0 ]; then
+        sed -i "s/^#\( *domain-rules .*-nameserver enc\)/\1/" "$RULES" 2>/dev/null
+    else
+        sed -i "s/^\( *domain-rules .*-nameserver enc\)/#\1/" "$RULES" 2>/dev/null
+    fi
+}
+
+# 域名校验：允许英文字母数字和 . - _，可带前导点（匹配子域）
+valid_domain() {
+    d="$1"
+    [ -n "$d" ] || return 1
+    [ ${#d} -le 120 ] || return 1
+    case "$d" in
+        .*) d2=${d#.} ;;
+        *)  d2=$d ;;
+    esac
+    [ -n "$d2" ] || return 1
+    printf '%s' "$d2" | grep -qE '^[A-Za-z0-9_]([A-Za-z0-9._-]*[A-Za-z0-9_])?$'
+}
+
+norm_domain() {
+    d=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's#^https\?://##; s#/.*$##; s#^\.##; s#\.$##')
+    printf '%s' "$d"
+}
+
+rule_line() {
+    d="$1"; t="$2"
+    case "$t" in
+        enc)     printf 'domain-rules /%s/ -nameserver enc' "$d" ;;
+        default) printf 'domain-rules /%s/ -nameserver default' "$d" ;;
+        block)   printf 'domain-rules /%s/ -address #' "$d" ;;
+        *)       return 1 ;;
+    esac
+}
+
+emit_rules() {
+    warn="$1"
+    arr=$(rules_lines | awk '
+        function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+        { if (n++) printf ","; printf "\"%s\"", esc($0) }
+    ')
+    printf '{"ok":true,"list":[%s],"file":"%s","count":%s,"encCount":%s'         "$arr" "$(json_esc "$RULES")" "$(rules_count)" "$(enc_count)"
+    if [ -n "$warn" ]; then
+        printf ',"warn":"%s"' "$(json_esc "$warn")"
+    fi
+    printf '}'
+}
+
+# =============================================================
+# VPN 共存
+# =============================================================
+# 出接口是隧道就认为 VPN / 代理在跑。
+# 必须排除内核自带的 tunl0（它的名字是 tun+l0，不是 tun+数字），否则恒判有 VPN。
+vpn_ifaces() {
+    ip -o link show up 2>/dev/null | awk -F': ' '{
+        n = $2
+        sub(/@.*/, "", n)
+        if (n ~ /^(tun|tap|ppp|utun|wg|ipsec)[0-9]+$/) printf "%s ", n
+    }'
+}
+
+vpn_mode() {
+    m=""
+    [ -f "$CFG" ] && m=$(sed -n 's/^[[:space:]]*vpn_compat=//p' "$CFG" 2>/dev/null | tail -1 | tr -d ' \r\n"')
+    case "$m" in
+        auto|proxy|off) ;;
+        *) m=auto ;;
+    esac
+    printf '%s' "$m"
+}
+
+vpn_apps_raw() {
+    a=""
+    [ -f "$CFG" ] && a=$(sed -n 's/^[[:space:]]*vpn_apps=//p' "$CFG" 2>/dev/null | tail -1)
+    a=$(printf '%s' "$a" | sed -e 's/^["'"'"']//' -e 's/["'"'"']$//')
+    printf '%s' "$a"
+}
+
+pm_uid_cache() {
+    _need=""
+    [ -s "$PM_UID_CACHE" ] || _need=1
+    if [ -z "$_need" ] && [ -f /data/system/packages.xml ] \
+       && [ "$PM_UID_CACHE" -ot /data/system/packages.xml ]; then
+        _need=1
+    fi
+    [ -n "$_need" ] || return 0
+    pm list packages -U 2>/dev/null \
+        | sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\).*/\1 \2/p' > "$PM_UID_CACHE" 2>/dev/null
+    [ -s "$PM_UID_CACHE" ] || rm -f "$PM_UID_CACHE" 2>/dev/null
+    return 0
+}
+
+pkg_uid() {
+    _u=$(stat -c %u "/data/data/$1" 2>/dev/null)
+    case "$_u" in
+        ''|*[!0-9]*) ;;
+        *) printf '%s' "$_u"; return 0 ;;
+    esac
+    pm_uid_cache
+    awk -v p="$1" '$1 == p { print $2; exit }' "$PM_UID_CACHE" 2>/dev/null
+}
+
+vpn_uids() {
+    for _p in $VPN_PKGS_DEFAULT $(vpn_apps_raw); do
+        _u=$(pkg_uid "$_p")
+        case "$_u" in ''|*[!0-9]*) continue ;; esac
+        printf '%s\n' "$_u"
+    done | sort -u | tr '\n' ' ' | sed -e 's/[[:space:]]*$//'
+}
+
+# v4 的劫持链是 A/B 轮换的（见 iptables.sh），这里必须跟着活动链走
+V4_CHAINS="ADGUARD ADGUARDB"
+active_v4() {
+    for _c in $V4_CHAINS; do
+        [ -n "$_c" ] || continue
+        iptables $IPT_W -t nat -C OUTPUT -j "$_c" >/dev/null 2>&1 && { printf '%s' "$_c"; return 0; }
+    done
+    return 0
+}
+
+jump_present() {
+    [ -n "$(active_v4)" ]
+}
+
+agh_rule_count() {
+    _c=$(active_v4)
+    [ -n "$_c" ] || _c=ADGUARD
+    n=$(iptables $IPT_W -t nat -S "$_c" 2>/dev/null | grep -c "^-A $_c" 2>/dev/null)
+    [ -n "$n" ] || n=0
+    printf '%s' "$n"
+}
+
+agh_redirect_count() {
+    _c=$(active_v4)
+    [ -n "$_c" ] || _c=ADGUARD
+    n=$(iptables $IPT_W -t nat -S "$_c" 2>/dev/null | grep -c 'REDIRECT --to-ports' 2>/dev/null)
+    [ -n "$n" ] || n=0
+    printf '%s' "$n"
+}
+
+# ---- IPv6 的 DNS 劫持状态（v6_dns：auto / redirect / drop / keep）----
+v6_mode_raw() {
+    m=""
+    [ -f "$CFG" ] && m=$(sed -n 's/^[[:space:]]*v6_dns=//p' "$CFG" 2>/dev/null | tail -1)
+    m=$(printf '%s' "$m" | sed -e 's/^["'"'"']//' -e 's/["'"'"']$//' -e 's/[[:space:]]*$//')
+    printf '%s' "$m"
+}
+
+v6_nat_ok() {
+    ip6tables $IPT_W -t nat -L -n >/dev/null 2>&1
+}
+
+# auto 且无 nat 表时该 drop 还是 keep：读 iptables.sh 自检写下的结论
+v6_auto_result() {
+    _r=$(head -1 /data/adb/agh/.v6_autores 2>/dev/null | tr -d ' \n\r')
+    case "$_r" in
+        keep|drop) printf '%s' "$_r" ;;
+        *)         printf 'drop' ;;
+    esac
+}
+
+v6_effective_mode() {
+    m=$(v6_mode_raw)
+    case "$m" in
+        keep|drop) printf '%s' "$m" ;;
+        # redirect 也依赖内核有 nat 表；没有就降级成 drop（iptables.sh 里同样降级），
+        # 这里必须如实反映，否则页面会显示「已劫持 · redirect · mangle」这种自相矛盾的状态。
+        redirect|auto|*)
+            if v6_nat_ok; then
+                printf 'redirect'
+            else
+                printf 'keep'
+            fi
+            ;;
+    esac
+}
+
+v6_hijack_on() {
+    # 以「实际挂上的跳转」为准：只要 mangle 或 nat 任一套被 OUTPUT 引用就算生效。
+    ip6tables $IPT_W -t mangle -C OUTPUT -j AGH_V6DNS >/dev/null 2>&1 && return 0
+    ip6tables $IPT_W -t nat -C OUTPUT -j ADGUARD6 >/dev/null 2>&1 && return 0
+    return 1
+}
+
+emit_vpn() {
+    _mode=$(vpn_mode)
+    _ifs=$(vpn_ifaces)
+    _active=0
+    [ -n "$(printf '%s' "$_ifs" | tr -d ' ')" ] && _active=1
+    _jump=0; jump_present && _jump=1
+    _rules=$(agh_rule_count)
+    _red=$(agh_redirect_count)
+    _hij=0
+    [ "$_jump" -eq 1 ] && [ "$_red" -gt 0 ] && _hij=1
+    _note=""
+    if [ "$_mode" = auto ] && [ "$_active" -eq 1 ]; then
+        _note="检测到 VPN，DNS 劫持已让路；VPN 断开后 5 秒内自动恢复"
+    elif [ "$_mode" = auto ]; then
+        _note="未检测到 VPN，DNS 劫持生效中"
+    elif [ "$_mode" = proxy ]; then
+        _note="串联模式：隧道出流量与 VPN 应用自身的查询不劫持"
+    else
+        _note="off：不做 VPN 判断，全量劫持"
+    fi
+    _v6m=$(v6_effective_mode)
+    _v6on=0
+    v6_hijack_on && _v6on=1
+    printf '{"ok":true,"mode":"%s","ifaces":"%s","vpn_active":%s,"jump":%s,"rules":%s,"redirect":%s,"hijack":%s,"v6_mode":"%s","v6_hijack":%s,"v6_nat":%s,"uids":"%s","note":"%s"}' \
+        "$(_json "$_mode")" "$(_json "$_ifs")" \
+        "$([ "$_active" -eq 1 ] && echo true || echo false)" \
+        "$([ "$_jump" -eq 1 ] && echo true || echo false)" \
+        "$_rules" "$_red" \
+        "$([ "$_hij" -eq 1 ] && echo true || echo false)" \
+        "$(_json "$_v6m")" \
+        "$([ "$_v6on" -eq 1 ] && echo true || echo false)" \
+        "$(if v6_nat_ok; then echo true; else echo false; fi)" \
+        "$(_json "$(vpn_uids)")" "$(_json "$_note")"
+}
+
+# 状态里的字符串也可能带引号/反斜杠，和 json_esc 走同一套
+_json() { json_esc "$1"; }
+
+# 等 iptables 守护循环（5s 一跳）把规则改成目标状态
+# 目标模式下 ADGUARD 链应有的 -A 条数（不含 -N）：
+#   auto+无VPN / off = 6（uid9999, -o lo, uid0→223.5.5.5 的 udp/tcp bootstrap, udp53, tcp53）
+#   auto+有VPN = 1（只留 -j RETURN）
+#   proxy = 12 + VPN应用uid数（6 基础 + 6 条出接口豁免 tun/tap/ppp/utun/wg/ipsec）
+# 注意：不再豁免 uid 0 —— netd(dnsproxyd) 就是 uid 0，豁免它等于让系统 DNS 绕过 AGH。
+vpn_expect_rules() {
+    _m="$1"
+    _v=$(printf "%s" "$(vpn_ifaces)" | tr -d " ")
+    case "$_m" in
+        auto) if [ -n "$_v" ]; then echo 1; else echo 6; fi ;;
+        off) echo 6 ;;
+        proxy) echo $((12 + $(printf "%s" "$(vpn_uids)" | wc -w))) ;;
+        *) echo 0 ;;
+    esac
+}
+
+wait_vpn_settle() {
+    _want="$1"
+    _n=0
+    while [ "$_n" -lt 24 ]; do
+        _m=$(vpn_mode)
+        [ "$_m" = "$_want" ] || { sleep 0.3; _n=$((_n+1)); continue; }
+        _ifs=$(vpn_ifaces)
+        _has=$(printf '%s' "$_ifs" | tr -d ' ')
+        _rc=$(agh_rule_count)
+        _want_n=$(vpn_expect_rules "$_m")
+        case "$_m" in
+            auto)
+                if [ -n "$_has" ]; then
+                    jump_present || { [ "$_rc" = "$_want_n" ] && return 0; }
+                else
+                    jump_present && [ "$(agh_redirect_count)" -gt 0 ] \
+                        && [ "$_rc" = "$_want_n" ] && return 0
+                fi
+                ;;
+            *)
+                jump_present && [ "$(agh_redirect_count)" -gt 0 ] \
+                    && [ "$_rc" = "$_want_n" ] && return 0
+                ;;
+        esac
+        sleep 0.3
+        _n=$((_n+1))
+    done
+    return 1
+}
+
+emit_enc() {
+    warn="$1"
+    arr=$(enc_lines | awk '
+        function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+        { if (n++) printf ","; printf "\"%s\"", esc($0) }
+    ')
+    run=false
+    enc_dnsenc_running && run=true
+    printf '{"ok":true,"list":[%s],"file":"%s","count":%s,"running":%s,"port":%s' \
+        "$arr" "$(json_esc "$ENC")" "$(enc_count)" "$run" "$ENCPORT"
+    if [ -n "$warn" ]; then
+        printf ',"warn":"%s"' "$(json_esc "$warn")"
+    fi
+    printf '}'
+}
+
+# ---------------- 解析 query string ----------------
+action=""
+srv=""
+dom=""
+target=""
+mode=""
+QS="$QUERY_STRING"
+[ -n "$QS" ] || QS="$1"
+
+oldIFS=$IFS
+IFS='&'
+for kv in $QS; do
+    k=${kv%%=*}
+    v=""
+    case "$kv" in *=*) v=${kv#*=} ;; esac
+    case "$k" in
+        action) action=$(urldecode "$v") ;;
+        srv)    srv=$(urldecode "$v") ;;
+        dom)    dom=$(urldecode "$v") ;;
+        target) target=$(urldecode "$v") ;;
+        mode)   mode=$(urldecode "$v") ;;
+    esac
+done
+IFS=$oldIFS
+
+[ -f "$SRV" ] || { mkdir -p "$(dirname "$SRV")" 2>/dev/null; : > "$SRV"; }
+
+case "$action" in
+list)
+    hdr
+    emit_list ""
+    ;;
+
+add)
+    [ -n "$srv" ] || fail "缺少 srv 参数"
+    srv=$(trim "$srv")
+    warn=""
+    line=$(canon_line "$srv")
+    [ -n "$line" ] || fail "缺少 srv 参数"
+
+    addr=$(addr_only "$line")
+    case "$addr" in
+        "") fail "缺少服务器地址" ;;
+    esac
+    valid_addr "$addr" || fail "地址格式不正确：$addr（示例 1.1.1.1 / dns.google / tls://dns.google / https://dns.google/dns-query）"
+
+    case "$line" in
+        server-tls\ *|server-https\ *)
+            warn="本模块内置 smartdns 构建未编译 TLS，DoT/DoH 上游会显示 Unknown，建议改用 UDP 上游"
+            ;;
+    esac
+
+    selfheal_srv
+    if list_lines "$SRV" | grep -qxF "$line"; then
+        hdr
+        emit_list "$warn"
+        exit 0
+    fi
+    if [ -s "$SRV" ]; then
+        if [ -n "$(tail -c 1 "$SRV" 2>/dev/null)" ]; then
+            printf '\n' >> "$SRV"
+        fi
+    fi
+    printf '%s\n' "$line" >> "$SRV"
+    hdr
+    emit_list "$warn"
+    ;;
+
+del)
+    [ -n "$srv" ] || fail "缺少 srv 参数"
+    selfheal_srv
+    want=$(canon_line "$srv")
+    [ -n "$want" ] || fail "缺少 srv 参数"
+    want_addr=$(addr_only "$want")
+
+    # 第一轮：整行完全一致；没命中则第二轮按地址一致（忽略 server / server-tls 前缀差异）
+    tmp="$SRV.tmp.$$"
+    : > "$tmp"
+    hit=0
+    while IFS= read -r ln; do
+        nrm=$(trim "$ln")
+        if [ "$nrm" = "$want" ]; then
+            hit=1
+            continue
+        fi
+        printf '%s\n' "$ln" >> "$tmp"
+    done < "$SRV"
+
+    if [ "$hit" -eq 0 ] && [ -n "$want_addr" ]; then
+        tmp2="$SRV.tmp2.$$"
+        : > "$tmp2"
+        while IFS= read -r ln; do
+            case "$ln" in
+                server[[:space:]]*|server-tcp[[:space:]]*|server-tls[[:space:]]*|server-https[[:space:]]*|server-udp[[:space:]]*)
+                    if [ "$(addr_only "$ln")" = "$want_addr" ]; then
+                        hit=1
+                        continue
+                    fi
+                    ;;
+            esac
+            printf '%s\n' "$ln" >> "$tmp2"
+        done < "$tmp"
+        cat "$tmp2" > "$tmp"
+        rm -f "$tmp2" 2>/dev/null
+    fi
+
+    cat "$tmp" > "$SRV"
+    rm -f "$tmp" 2>/dev/null
+    hdr
+    if [ "$hit" -eq 1 ]; then
+        emit_list ""
+    else
+        printf '{"ok":false,"error":"未找到该上游：%s"}' "$(json_esc "$srv")"
+    fi
+    ;;
+
+restart)
+    hdr
+    if [ -f "$RESTART" ]; then
+        sh "$RESTART" >/dev/null 2>&1
+    else
+        pkill -9 -f '/usr/local/lib/smartdns/smartdns' 2>/dev/null
+    fi
+    sleep 3
+    if pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1; then
+        printf '{"ok":true,"msg":"SmartDNS 已重启，新配置已生效"}'
+    else
+        printf '{"ok":false,"error":"SmartDNS 未起来，请检查 servers.conf 语法"}'
+    fi
+    ;;
+
+flush)
+    hdr
+    # 只清缓存文件，绝不删 data-dir 目录本身：smartdns.db（UI 数据库）在里面，
+    # 目录被删会导致 UI 报「服务器请求处理已暂停」并丢弃所有查询。
+    rm -f "$SD/var/lib/smartdns/smartdns.cache" "$SD/var/cache/smartdns/smartdns.cache" 2>/dev/null
+    rm -f "$SD/tmp/smartdns.cache" "$SD/tmp/smartdns/smartdns.cache" 2>/dev/null
+    if [ -f "$RESTART" ]; then
+        sh "$RESTART" >/dev/null 2>&1
+    else
+        pkill -9 -f '/usr/local/lib/smartdns/smartdns' 2>/dev/null
+    fi
+    sleep 3
+    if pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1; then
+        printf '{"ok":true,"msg":"缓存已清空，SmartDNS 已重启"}'
+    else
+        printf '{"ok":false,"error":"SmartDNS 未起来"}'
+    fi
+    ;;
+
+ruleslist)
+    hdr
+    emit_rules ""
+    ;;
+
+ruleadd)
+    [ -n "$dom" ] || fail "缺少 dom 参数"
+    d=$(norm_domain "$dom")
+    valid_domain "$d" || fail "域名格式不正确：$dom（示例 google.com / .google.com）"
+    t=$(printf '%s' "$target" | tr 'A-Z' 'a-z')
+    [ -n "$t" ] || t=enc
+    ln=$(rule_line "$d" "$t") || fail "未知分流目标：$target（可选 enc / default / block）"
+    [ -f "$RULES" ] || { mkdir -p "$(dirname "$RULES")" 2>/dev/null; : > "$RULES"; }
+    # 同一域名只保留一条规则：先删旧规则的生效行
+    if rules_lines | grep -qF "/$d/"; then
+        awk -v dd="$d" '!( /^[[:space:]]*domain-rules[[:space:]]/ && index($0, "/" dd "/") )' "$RULES" > "$RULES.tmp.$$" 2>/dev/null && cat "$RULES.tmp.$$" > "$RULES"
+        rm -f "$RULES.tmp.$$" 2>/dev/null
+    fi
+    if [ -s "$RULES" ] && [ -n "$(tail -c 1 "$RULES" 2>/dev/null)" ]; then
+        printf '\n' >> "$RULES"
+    fi
+    printf '%s\n' "$ln" >> "$RULES"
+    enc_sync
+    [ -f "$RESTART" ] && sh "$RESTART" >/dev/null 2>&1
+    hdr
+    emit_rules "已添加 $d → $t，SmartDNS 已重启"
+    ;;
+
+ruledel)
+    [ -n "$dom" ] || fail "缺少 dom 参数"
+    d=$(norm_domain "$dom")
+    [ -f "$RULES" ] || fail "没有分流规则文件"
+    if rules_lines | grep -qF "/$d/"; then
+        awk -v dd="$d" '!( /^[[:space:]]*domain-rules[[:space:]]/ && index($0, "/" dd "/") )' "$RULES" > "$RULES.tmp.$$" 2>/dev/null && cat "$RULES.tmp.$$" > "$RULES"
+        rm -f "$RULES.tmp.$$" 2>/dev/null
+        [ -f "$RESTART" ] && sh "$RESTART" >/dev/null 2>&1
+        hdr
+        emit_rules "已删除 $d 的分流规则，SmartDNS 已重启"
+    else
+        fail "未找到该域名的分流规则：$d"
+    fi
+    ;;
+
+enclist)
+    hdr
+    emit_enc ""
+    ;;
+
+encadd)
+    [ -n "$srv" ] || fail "缺少 srv 参数"
+    line=$(enc_canon "$srv")
+    [ -n "$line" ] || fail "无法识别的写法：$srv（示例 doh https://dns.alidns.com/dns-query / dot dns.alidns.com / https://doh.pub/dns-query）"
+    addr=$(enc_addr "$line")
+    valid_addr "$addr" || fail "地址格式不正确：$addr"
+    [ -f "$ENC" ] || { mkdir -p "$(dirname "$ENC")" 2>/dev/null; : > "$ENC"; }
+    before=$(enc_count)
+    if enc_lines | grep -qxF "$line"; then
+        hdr
+        emit_enc "这条已经在列表里了"
+        exit 0
+    fi
+    if [ -s "$ENC" ] && [ -n "$(tail -c 1 "$ENC" 2>/dev/null)" ]; then
+        printf '\n' >> "$ENC"
+    fi
+    printf '%s\n' "$line" >> "$ENC"
+    enc_sync
+    if [ "$before" -eq 0 ]; then
+        # 从无到有：smartdns 需要重读 conf 才会多出 127.0.0.1:6054 上游
+        enc_start >/dev/null 2>&1
+        if [ -f "$RESTART" ]; then sh "$RESTART" >/dev/null 2>&1; fi
+        hdr
+        emit_enc "已添加并启用加密上游（已重启 smartdns 载入新上游）"
+        exit 0
+    fi
+    enc_start >/dev/null 2>&1
+    hdr
+    emit_enc "已添加，加密转发已重载"
+    ;;
+
+encdel)
+    [ -n "$srv" ] || fail "缺少 srv 参数"
+    want=$(enc_canon "$srv")
+    [ -n "$want" ] || fail "缺少 srv 参数"
+    [ -f "$ENC" ] || fail "加密上游列表为空"
+    tmp="$ENC.tmp.$$"
+    : > "$tmp"
+    hit=0
+    while IFS= read -r ln; do
+        nrm=$(trim "$ln")
+        case "$nrm" in
+            "#"*|"")
+                printf '%s\n' "$ln" >> "$tmp"
+                continue
+                ;;
+        esac
+        if [ "$nrm" = "$want" ] || [ "$nrm" = "$srv" ]; then
+            hit=1
+            continue
+        fi
+        printf '%s\n' "$ln" >> "$tmp"
+    done < "$ENC"
+    cat "$tmp" > "$ENC"
+    rm -f "$tmp" 2>/dev/null
+    enc_sync
+    left=$(enc_count)
+    if [ "$left" -eq 0 ]; then
+        pkill -9 -f "$DNSENC" 2>/dev/null
+        if [ -f "$RESTART" ]; then sh "$RESTART" >/dev/null 2>&1; fi
+    else
+        enc_start >/dev/null 2>&1
+    fi
+    hdr
+    if [ "$hit" -eq 1 ]; then
+        emit_enc "已删除"
+    else
+        printf '{"ok":false,"error":"未找到该加密上游：%s"}' "$(json_esc "$srv")"
+    fi
+    ;;
+
+encprobe)
+    hdr
+    [ -x "$DNSENC" ] || fail "dnsenc 不存在：$DNSENC"
+    [ "$(enc_count)" -gt 0 ] || fail "还没有配置加密上游"
+    out=$(SSL_CERT_DIR=/system/etc/security/cacerts/ "$DNSENC" -probe -conf "$ENC" 2>&1)
+    if [ -z "$out" ]; then
+        fail "探测无输出，检查 $ENC"
+    fi
+    printf '%s' "$out"
+    ;;
+
+encrestart)
+    hdr
+    enc_sync
+    if [ "$(enc_count)" -eq 0 ]; then
+        pkill -9 -f "$DNSENC" 2>/dev/null
+        if [ -f "$RESTART" ]; then sh "$RESTART" >/dev/null 2>&1; fi
+        printf '{"ok":true,"msg":"当前没有加密上游，已关闭加密转发并重启 smartdns"}'
+        exit 0
+    fi
+    enc_start >/dev/null 2>&1
+    if [ -f "$RESTART" ]; then sh "$RESTART" >/dev/null 2>&1; fi
+    sleep 2
+    if enc_dnsenc_running && pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1; then
+        printf '{"ok":true,"msg":"加密转发与 SmartDNS 均已重启"}'
+    elif enc_dnsenc_running; then
+        printf '{"ok":false,"warn":"加密转发已起，但 SmartDNS 未起来，检查 $CONF 语法"}'
+    else
+        printf '{"ok":false,"error":"加密转发启动失败，查看 /data/adb/agh/dnsenc.log"}'
+    fi
+    ;;
+
+vpnstatus)
+    hdr
+    emit_vpn
+    ;;
+
+vpnmode)
+    hdr
+    m=$(trim "$(printf '%s' "${mode:-}" )")
+    case "$m" in
+        auto|proxy|off) ;;
+        *) fail "mode 只能是 auto / proxy / off" ;;
+    esac
+    [ -f "$CFG" ] || fail "找不到配置文件：$CFG"
+    if grep -qE '^[[:space:]]*vpn_compat=' "$CFG"; then
+        sed -i "s|^[[:space:]]*vpn_compat=.*|vpn_compat=$m|" "$CFG"
+    else
+        [ -n "$(tail -c 1 "$CFG" 2>/dev/null)" ] && printf '\n' >> "$CFG"
+        printf 'vpn_compat=%s\n' "$m" >> "$CFG"
+    fi
+    # 立刻重建：iptables.sh --once 不依赖守护循环的 5 秒间隔
+    if [ -f "$IPT" ]; then sh "$IPT" --once >/dev/null 2>&1; fi
+    if wait_vpn_settle "$m"; then
+        printf '{"ok":true,"msg":"已切换为 %s，规则已按新模式重建","mode":"%s"' "$m" "$m"
+    else
+        printf '{"ok":true,"msg":"已写入 %s，规则重建中（守护循环 5 秒内生效）","mode":"%s"' "$m" "$m"
+    fi
+    printf ',"ifaces":"%s","vpn_active":%s' \
+        "$(_json "$(vpn_ifaces)")" \
+        "$([ -n "$(printf '%s' "$(vpn_ifaces)" | tr -d ' ')" ] && echo true || echo false)"
+    _j=0; jump_present && _j=1
+    printf ',"jump":%s,"rules":%s,"redirect":%s' \
+        "$([ "$_j" -eq 1 ] && echo true || echo false)" "$(agh_rule_count)" "$(agh_redirect_count)"
+    _h=0
+    [ "$_j" -eq 1 ] && [ "$(agh_redirect_count)" -gt 0 ] && _h=1
+    printf ',"hijack":%s,"uids":"%s","note":"%s"}' \
+        "$([ "$_h" -eq 1 ] && echo true || echo false)" \
+        "$(_json "$(vpn_uids)")" "模式已切换为 $m"
+    ;;
+
+v6mode)
+    hdr
+    m=$(trim "$(printf '%s' "${mode:-}" )")
+    case "$m" in
+        auto|redirect|drop|keep) ;;
+        *) fail "mode 只能是 auto / redirect / drop / keep" ;;
+    esac
+    [ -f "$CFG" ] || fail "找不到配置文件：$CFG"
+    if grep -qE '^[[:space:]]*v6_dns=' "$CFG"; then
+        sed -i "s|^[[:space:]]*v6_dns=.*|v6_dns=$m|" "$CFG"
+    else
+        [ -n "$(tail -c 1 "$CFG" 2>/dev/null)" ] && printf '\n' >> "$CFG"
+        printf 'v6_dns=%s\n' "$m" >> "$CFG"
+    fi
+    # 只重建 v6：不要用 --once，那会把 v4 的 ADGUARD 链拆掉重建，期间 DNS 裸奔
+    if [ -f "$IPT" ]; then sh "$IPT" --v6 >/dev/null 2>&1; fi
+    _eff=$(v6_effective_mode)
+    _on=0
+    v6_hijack_on && _on=1
+    printf '{"ok":true,"mode":"%s","effective":"%s","v6_mode":"%s","v6_hijack":%s,"v6_nat":%s,"msg":"已写入 v6_dns=%s，实际生效 %s"}' \
+        "$(_json "$m")" "$(_json "$_eff")" "$(_json "$_eff")" \
+        "$([ "$_on" -eq 1 ] && echo true || echo false)" \
+        "$(if v6_nat_ok; then echo true; else echo false; fi)" \
+        "$(_json "$m")" "$(_json "$_eff")"
+    ;;
+
+*)
+    fail "未知 action：$action"
+    ;;
+esac

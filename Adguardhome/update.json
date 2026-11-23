@@ -1,0 +1,6 @@
+{
+  "version": "20261124",
+  "versionCode": 20261124,
+  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/20261124/AdGuardHome-SmartDNS-Merged-20261124.zip",
+  "changelog": "[20261124] 上游服务器管理真正内置：AGH 面板侧栏新增「上游服务器管理」路由页（不再外跳 6081），点侧栏切换页面即时渲染（修复路由切换第一次显示旧页面要刷新的问题）；三层拦截（DNS+HTTP Host+TLS SNI+QUIC DROP）继续默认生效。"
+}

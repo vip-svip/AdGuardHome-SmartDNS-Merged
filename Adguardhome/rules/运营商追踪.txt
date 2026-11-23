@@ -1,0 +1,84 @@
+! ============================================================
+! 运营商隐私采集拦截（独立规则，可单独停用）
+! 移动 / 联通 / 电信 / 广电 的统计与行为上报域名
+! 诚实说明：运营商在网络层（DPI/流量审计）的监控 DNS 拦不到，
+! 本规则拦的是运营商 App、SDK 与门户统计子域的上报；
+! 想让运营商看不到你做了什么，唯一干净的办法是全程走可信加密隧道（DoH + VPN/代理）
+! ============================================================
+
+! ---- 中国移动 10086.cn / 12588 统计与埋点 ----
+||stats.10086.cn^
+||track.10086.cn^
+||log.10086.cn^
+||collect.10086.cn^
+||data.10086.cn^
+||report.10086.cn^
+||oms.10086.cn^
+||st.mmarket.com^
+||click.mmarket.com^
+||stat.mmarket.com^
+
+! ---- 咪咕系（中移动内容板块）埋点 ----
+||log.miguvideo.com^
+||track.migu.cn^
+||stat.migu.cn^
+
+! ---- 和彩云 / 和包 / 139邮箱 统计 ----
+||stat.139.com^
+||track.139.com^
+||log.139.com^
+||stat.hepay.cn^
+||log.hepay.cn^
+
+! ---- 联通 10010.cn / wo.cn 统计与埋点 ----
+||stats.10010.cn^
+||track.10010.cn^
+||log.10010.cn^
+||collect.10010.cn^
+||analytics.10010.cn^
+||st.10010.cn^
+||stat.wostore.cn^
+||log.wostore.cn^
+
+! ---- 沃云 / 沃邮箱 统计 ----
+||stat.wo.cn^
+||log.wo.cn^
+||track.wo.cn^
+
+! ---- 中国电信 189.cn / chinatelecom 统计与埋点 ----
+||stats.189.cn^
+||track.189.cn^
+||log.189.cn^
+||collect.189.cn^
+||st.189.cn^
+||stat.tyread.com^
+||log.tyread.com^
+||track.bestv.com.cn^
+
+! ---- 天翼云盘 / 189邮箱 统计 ----
+||log.ecloud.189.cn^
+||track.ecloud.189.cn^
+
+! ---- 中国广电 cbn.cn 统计与埋点 ----
+||stats.cbn.cn^
+||track.cbn.cn^
+||log.cbn.cn^
+||collect.cbn.cn^
+
+! ---- 运营商公共能力平台（一键登录/免流标记）----
+! 注意：拦了会断「手机号一键登录」，如果某个 App 登录失败，先到仪表盘把本条放行
+||cmpassport.com^
+||cmpassport.net^
+||id6.me^
+||onekey.189.cn^
+||auth.wocloud.cn^
+
+! ---- Wi-Fi 探针/ portal 探测常客 ----
+||wlan.10086.cn^
+||portal.10010.cn^
+||wlan.189.cn^
+
+! ---- 运营商广告平台统计 ----
+||stat.10086.cn^
+||stat.10010.cn^
+||stat.189.cn^

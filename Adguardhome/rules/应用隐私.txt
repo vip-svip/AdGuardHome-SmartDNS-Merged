@@ -1,0 +1,162 @@
+! ============================================================
+! 应用隐私采集拦截（独立规则，可单独停用）
+! 拦 App 内置的统计/埋点/行为采集 SDK 域名
+! 局限说明：个别 App 崩溃统计会失效，核心功能不受影响；
+! 极光/个推只拦统计子域，不断推送通道
+! ============================================================
+
+! ---- 友盟系（Umeng，国内最广的 App 统计）----
+||umeng.com^
+||umeng.co^
+||umengcloud.com^
+||ucinfo.umeng.com^
+||upush.com^
+||i.umeng.com^
+||u.umeng.com^
+||stat.umeng.com^
+
+! ---- TalkingData 统计 ----
+||talkingdata.com^
+||talkingdata.net^
+||tdat.talkingdata.com^
+||xmostats.talkingdata.com^
+||ap.talkingdata.com^
+
+! ---- 神策数据 SensorsData ----
+||sensorsdata.cn^
+||sensors.com^
+||jssdk.sensorsdata.com^
+||sa.sensorsdata.cn^
+
+! ---- GrowingIO / 诸葛io ----
+||growingio.com^
+||zhugeio.com^
+||giocdn.com^
+
+! ---- 极光 JPush/JAnalytics（只拦统计，不碰推送通道）----
+||stat.jpush.cn^
+||janalytics.cn^
+||report.jiguang.cn^
+||analytics.jiguang.cn^
+
+! ---- 个推/个灯 统计（不碰推送通道）----
+||stat.getui.com^
+||geds.getui.com^
+||log.getui.com^
+
+! ---- 腾讯移动分析 MTA / 腾讯灯塔 ----
+||mta.qq.com^
+||pingma.qq.com^
+||pingtcss.qq.com^
+||beacon.qq.com^
+||report.beacon.qq.com^
+||tm.qq.com^
+||sta.qq.com^
+
+! ---- 百度统计 ----
+||hm.baidu.com^
+||ma.baidu.com^
+||mt.baidu.com^
+
+! ---- CNZZ / 友盟+ 网页统计 ----
+||cnzz.com^
+||cnzz.cn^
+||zstat.cn^
+
+! ---- 阿里系埋点 ----
+||arms-retcode.aliyuncs.com^
+||retcode.aliyuncs.com^
+||fourier.taobao.com^
+||log.mmstat.com^
+||ac.mmstat.com^
+||log.alibaba.com^
+||s.alibaba.com^
+
+! ---- 字节跳动 AppLog ----
+||applog.snssdk.com^
+||applog.toutiao.com^
+||log.snssdk.com^
+||mon.snssdk.com^
+||applog.musical.ly^
+||log.toutiao.com^
+||log.snssdk.net^
+
+! ---- 快手埋点 ----
+||log.ksapisrv.com^
+||log.kuaishou.com^
+||stat.kuaishou.com^
+
+! ---- B站埋点 ----
+||data.bilibili.com^
+||api.bilibili.com^
+||stat.bilibili.com^
+
+! ---- 微博埋点 ----
+||data.weibo.com^
+||stat.weibo.com^
+
+! ---- 网易统计 ----
+||data.163.com^
+||log.163.com^
+||s.163.com^
+
+! ---- 易观 ----
+||analysys.cn^
+
+! ---- 手机厂商遥测 ----
+||data.mistat.xiaomi.com^
+||data.mistat.intl.xiaomi.com^
+||tracking.miui.com^
+||tracking.re.miui.com^
+||adv.sec.miui.com^
+||stat.xiaomi.com^
+||data.mistat.de^
+||metrics.data.hicloud.com^
+||logservice.hicloud.com^
+||logbeta.cloud.hicloud.com^
+||collect.heytapmobi.com^
+||collect.oppomobile.com^
+||stat.vivo.com.cn^
+||collect.360.cn^
+||stat.honor.com^
+||metrics.samsung.com^
+
+! ---- Google 系遥测（国内 App 也会集成）----
+||app-measurement.com^
+||crashlytics.com^
+||firebase-settings.crashlytics.com^
+||app-measurement.cn^
+||adservice.google.com^
+||googletagservices.com^
+
+! ---- 国际归因/统计 SDK ----
+||appsflyer.com^
+||adjust.com^
+||adjust.io^
+||branch.io^
+||kochava.com^
+||localytics.com^
+||mixpanel.com^
+||amplitude.com^
+||flurry.com^
+||instabug.com^
+||sentry.io^
+
+! ---- 广告监测/曝光归因（国内）----
+||miaozhen.com^
+||admaster.com.cn^
+||tanx.com^
+||allyes.com^
+||zamplus.com^
+||winoads.com^
+
+! ---- 热图/行为录制 ----
+||hotjar.com^
+||fullstory.com^
+
+! ---- 支付/社交/短视频 埋点补充 ----
+||log.alipay.com^
+||log.wechat.com^
+||stat.wechat.com^
+||log.douyin.com^
+||stat.douyin.com^
