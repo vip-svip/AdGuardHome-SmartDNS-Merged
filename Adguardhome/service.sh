@@ -765,7 +765,7 @@ agh_filter_heal() {
         _i=0
         while [ "$_i" -lt 3 ]; do
             _r=$(curl -s -m 180 -b "$_ck" -H "Content-Type: application/json" \
-                 -d "{\"whitelist\":false,\"ids":[$_zero_ids]}" \
+                 -d "{\"whitelist\":false,\"ids\":[$_zero_ids]}" \
                  "http://127.0.0.1:$_port/control/filtering/refresh" 2>/dev/null)
             case "$_r" in
                 *'"updated"'*) break ;;
