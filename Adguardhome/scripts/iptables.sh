@@ -691,10 +691,19 @@ sni_want() {
 
 sni_chain_down() {
     for _ipt in iptables ip6tables; do
-        "$_ipt" $IPT_W -t filter -D OUTPUT -j "$SNI_CHAIN" 2>/dev/null
-        "$_ipt" $IPT_W -t filter -D OUTPUT -j "$SNI_CHAIN" 2>/dev/null
+        # -D 循环删挂载（上限 10 次，防历史多次 -I 残留导致 -X 引用计数非零）
+        _n=0
+        while "$_ipt" $IPT_W -t filter -D OUTPUT -j "$SNI_CHAIN" 2>/dev/null; do
+            _n=$((_n + 1))
+            [ "$_n" -ge 10 ] && break
+        done
         "$_ipt" $IPT_W -t filter -F "$SNI_CHAIN" 2>/dev/null
         "$_ipt" $IPT_W -t filter -X "$SNI_CHAIN" 2>/dev/null
+        # -F 失败兜底：无 wait 再试一次
+        if "$_ipt" -S "$SNI_CHAIN" 2>/dev/null | grep -qv '^-N'; then
+            "$_ipt" -F "$SNI_CHAIN" 2>/dev/null
+            "$_ipt" -X "$SNI_CHAIN" 2>/dev/null
+        fi
     done
 }
 
@@ -726,6 +735,21 @@ sni_chain_up() {
 }
 
 sni_sync_apply() {
+    # 并发锁：15:16 实测 5 个进程同秒并发 chain_up 导致 v6 链规则堆积 3 遍。
+    # set -C 原子创建锁文件，拿不到就等 3 秒重试一次；还拿不到则退出
+    # （前一个进程正在动手，state 马上会被更新，本进程下轮 sni_sync 会看到一致状态）。
+    _sni_lk="$AGH_DIR/.sni.lock"
+    if ( set -C; echo $$ > "$_sni_lk" ) 2>/dev/null; then
+        :
+    else
+        sleep 3
+        if ( set -C; echo $$ > "$_sni_lk" ) 2>/dev/null; then
+            :
+        else
+            echo "$(date '+%F %T') sni_sync_apply SKIP: lock busy ($_sni_lk)" >>"$SNI_LOG"
+            return 0
+        fi
+    fi
     _want="$(sni_want)"
     echo "$(date '+%F %T') sni_sync_apply want=[$_want]" >>"$SNI_LOG"
     case "$_want" in
@@ -745,6 +769,7 @@ sni_sync_apply() {
             log_vpn "SNI 拦截已开启：filter OUTPUT -> AGH_SNI（NFQUEUE $_q，端口 $_p，drop_quic=$_dq，fail-open）。"
             ;;
     esac
+    rm -f "$_sni_lk" 2>/dev/null
 }
 
 sni_sync() {
