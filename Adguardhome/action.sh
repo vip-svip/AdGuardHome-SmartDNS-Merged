@@ -34,7 +34,14 @@ fi
 
 echo "Web UI 端口：$PORT"
 echo "打开：http://127.0.0.1:$PORT"
-am start -a android.intent.action.VIEW -d "http://127.0.0.1:$PORT"
+LAN_IP=$(ip -4 addr show wlan0 2>/dev/null | sed -n 's/.*inet \([0-9.\/]*\) .*/\1/p' | head -1 | cut -d/ -f1)
+if [ -n "$LAN_IP" ]; then
+    echo "打开：http://$LAN_IP:$PORT （局域网地址，部分隐私浏览器禁 localhost 就用这个）"
+    echo "本机地址：http://127.0.0.1:$PORT"
+    am start -a android.intent.action.VIEW -d "http://$LAN_IP:$PORT"
+else
+    am start -a android.intent.action.VIEW -d "http://127.0.0.1:$PORT"
+fi
 echo "SmartDNS 管理 UI: http://127.0.0.1:6080 (账号 root/root)"
 echo "上游服务器管理:  http://127.0.0.1:6081/upstream-manage.html"
 echo "内置规则目录:    $MODDIR/rules"
