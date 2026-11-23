@@ -916,6 +916,17 @@ SNI_EOF
 # 确保 SNI 过滤器配置完整（端口覆盖 + drop_quic），AGH 启动时强制执行
 ensure_sni_filter
 
+# 关闭 querylog 文件日志：AGH 默认间隔 1 天轮转写日志，规则加强后命中量暴增，
+# 每天写 2GB 日志（累计 6.5GB 打满磁盘），AGH 与守护 I/O 压力巨大，被 ColorOS OFreezer
+# 冻结连锁杀。只保留内存日志（面板查询够用），不落盘。
+ensure_querylog_off() {
+    _y="$BIN_DIR/AdGuardHome.yaml"
+    [ -f "$_y" ] || return 0
+    sed -i 's/^  file_enabled: true/  file_enabled: false/' "$_y" 2>/dev/null
+    return 0
+}
+ensure_querylog_off
+
 # 过滤器缓存为空时自动重新下载（全新安装 / 跨版本升级后必备，否则没有拦截效果）
 agh_rules_guard
 

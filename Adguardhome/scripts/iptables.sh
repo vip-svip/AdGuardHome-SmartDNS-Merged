@@ -961,6 +961,7 @@ fi
 
 while true; do
     date +%s > "$AGH_DIR/.daemon_hb" 2>/dev/null
+    echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
     . "$AGH_DIR/scripts/config.prop"
     [ -n "$vpn_compat" ] || vpn_compat=auto
     [ -n "$vpn_apps" ] || vpn_apps=""
