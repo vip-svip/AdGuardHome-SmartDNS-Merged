@@ -373,9 +373,10 @@ net_up() {
     [ -n "$(ip route show table main default 2>/dev/null)" ] && return 0
     # 极老的 toybox 没有 "ip route show default"
     ip route 2>/dev/null | grep -q '^default ' && return 0
+    # vgate/虚拟网关类 ROM 没有 default 路由但有全局 src（OPPO vgate0 实测）
+    ip -4 addr show 2>/dev/null | grep -q 'scope global' && return 0
     return 1
 }
-
 start_smartdns() {
     [ -x "$SMARTDNS_BIN" ] || return 1
     smartdns_running && sd_listening && return 0
@@ -719,7 +720,7 @@ agh_filter_heal() {
     done
     if [ "$_lc" != "200" ]; then
         rm -f "$_ck"
-        [ "$lang" = "zh" ] && log "[WARN] 无法登录 AGH API（HTTP ${_lc:-无}，改 config.prop 的 agh_user/agh_pass），跳过过滤器自愈。" \
+        [ "$lang" = "zh" ] && log "[WARN] 无法登录 AGH API（HTTP ${_lc:-none}，改 config.prop 的 agh_user/agh_pass），跳过过滤器自愈。" \
                            || log "[WARN] AGH API login failed (HTTP ${_lc:-none}); set agh_user/agh_pass in config.prop to enable filter self-heal."
         return 0
     fi
@@ -773,7 +774,7 @@ agh_filter_heal() {
             _i=$((_i + 1))
             sleep 2
         done
-        [ "$lang" = "zh" ] && log "部分过滤器规则数为 0，已刷新：${_r:-无响应}" \
+        [ "$lang" = "zh" ] && log "部分过滤器规则数为 0，已刷新：${_r:-noresp}" \
                            || log "Some filters had 0 rules; refreshed them: ${_r:-no response}"
     fi
     if [ "${_total:-0}" -eq 0 ]; then
@@ -795,7 +796,7 @@ agh_filter_heal() {
             _i=$((_i + 1))
             sleep 2
         done
-        [ "$lang" = "zh" ] && log "过滤器缓存为空，已触发重新下载：${_r:-无响应}" \
+        [ "$lang" = "zh" ] && log "过滤器缓存为空，已触发重新下载：${_r:-noresp}" \
                            || log "Filter caches were empty; triggered a fresh download: ${_r:-no response}"
         _after=$(curl -s -m 15 -b "$_ck" "http://127.0.0.1:$_port/control/filtering/status" 2>/dev/null \
                  | tr ',' '\n' | awk -F: '/rules_count/{gsub(/[^0-9]/,"",$2); s+=$2} END{print s+0}')
