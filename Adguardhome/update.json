@@ -1,6 +1,6 @@
 {
   "version": "20261125",
   "versionCode": 20261125,
-  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/20261125/AdGuardHome-SmartDNS-Merged-20261125.zip",
-  "changelog": "[20261125] 隐私防线扩容：新增 3 个独立隐私过滤器（应用隐私 112 条/运营商追踪 54 条/反诈上报 24 条，仪表盘可单独停用）；色情网站补到 107 条、水印补到 118 条；SNI 拦截扩到 11 端口（含 Cloudflare 备用端口）；SNI 链并发锁修复规则堆积；过滤器零计数自愈修复。"
+  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/20261125/AdguardHome-SmartDNS-Merged-20261125.zip",
+  "changelog": "[20261125] 隐私防线扩展：新增 3 个独立隐私过滤器（应用隐私 112 条、运营商追踪 54 条、反诈上报 24 条，仪表盘可单独停用）；色情网站补到 107 条、水印补到 118 条；SNI 拦截扩到 11 端口（含 Cloudflare 备用端口）；SNI 链并发锁修复规则堆积；过滤器零计数自愈修复；根治 OPPO 挂机（关闭 querylog 文件日志 + 守护 oom_score_adj=-1000 + AGH 二进制同步补丁版）；面板上游服务器入口保留 SmartDNS 原生入口"
 }
