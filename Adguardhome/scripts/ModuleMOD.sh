@@ -41,14 +41,19 @@ _daemon_pid() {
 
 # 单实例：只允许一个 ModuleMOD 在跑（否则每次开机多一个，两个循环同时改描述/拉守护）
 MM_PIDF=/data/adb/agh/.modulemod.pid
-if [ -f "$MM_PIDF" ]; then
-    _mp=$(cat "$MM_PIDF" 2>/dev/null)
-    if [ -n "$_mp" ] && [ "$_mp" != "$$" ] && [ -d "/proc/$_mp" ]; then
-        echo "[INFO] ModuleMOD 已在运行(pid=$_mp)，本次退出。"
+MM_LOCK=/data/adb/agh/.modulemod.lock
+# 原子锁：set -C（noclobber）保证并发启动时只有一个能建文件
+if ! ( set -C; echo $$ > "$MM_LOCK" ) 2>/dev/null; then
+    _lp=$(cat "$MM_LOCK" 2>/dev/null)
+    if [ -n "$_lp" ] && [ "$_lp" != "$$" ] && [ -d "/proc/$_lp" ]; then
+        echo "[INFO] ModuleMOD 已在运行(pid=$_lp)，本次退出。"
         exit 0
     fi
+    rm -f "$MM_LOCK"
+    ( set -C; echo $$ > "$MM_LOCK" ) 2>/dev/null || exit 0
 fi
 echo $$ > "$MM_PIDF"
+trap 'rm -f "$MM_LOCK"' EXIT
 _keep_alive() {
     _d=$(_daemon_pid)
     if [ -z "$_d" ]; then
