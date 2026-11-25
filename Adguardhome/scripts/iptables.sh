@@ -342,18 +342,6 @@ pkg_uid() {
     awk -v p="$1" '$1 == p { print $2; exit }' "$PM_UID_CACHE" 2>/dev/null
 }
 
-# 应用分流：/data/adb/agh/apps_bypass.txt 里每行一个 uid，命中就不劫持 DNS、不进 SNI/隐私链
-# （给需要直连/被误拦的应用放行；force 名单优先级更高，两处都出现按 force 处理）
-app_bypass_uids() {
-    _f=/data/adb/agh/apps_bypass.txt
-    [ -f "$_f" ] || return 0
-    grep -oE '^[0-9]+' "$_f" 2>/dev/null | sort -u | tr '\n' ' '
-}
-app_force_uids() {
-    _f=/data/adb/agh/apps_force.txt
-    [ -f "$_f" ] || return 0
-    grep -oE '^[0-9]+' "$_f" 2>/dev/null | sort -u | tr '\n' ' '
-}
 vpn_uids() {
     for _p in $VPN_PKGS_DEFAULT $vpn_apps; do
         _u=$(pkg_uid "$_p")
@@ -748,12 +736,6 @@ sni_chain_up() {
         "$_ipt" $IPT_W -t filter -F "$SNI_CHAIN" 2>/dev/null
         "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -o lo -j RETURN 2>/dev/null
         "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -m owner --uid-owner 0 -j RETURN 2>/dev/null
-        # 应用分流：bypass 名单不进 SNI 检查
-        _sforce="$(app_force_uids)"
-        for _sbu in $(app_bypass_uids); do
-            case " $_sforce " in *" $_sbu "*) continue ;; esac
-            "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -m owner --uid-owner "$_sbu" -j RETURN 2>/dev/null
-        done
         # 豁免 VPN/代理应用（BoxProxy 共存）
         for _vu in $(vpn_uids); do
             "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -m owner --uid-owner "$_vu" -j RETURN 2>/dev/null
@@ -916,12 +898,6 @@ rebuild_rules_raw() {
     # SmartDNS 的上游是 127.0.0.1:6054（dnsenc，回环），不走 nat OUTPUT 的 53 端口
     # 回环豁免：本机解析器（127.0.0.1:53 之类）不出网，劫持它没有意义还会自环
     iptables $IPT_W -t nat -A "$_new" -o lo -j RETURN
-    # 应用分流：bypass 名单不劫持 DNS（force 名单仍在下面照常劫持）
-    _force="$(app_force_uids)"
-    for _bu in $(app_bypass_uids); do
-        case " $_force " in *" $_bu "*) continue ;; esac
-        iptables $IPT_W -t nat -A "$_new" -m owner --uid-owner "$_bu" -j RETURN 2>/dev/null
-    done
     # 防回环：SmartDNS(chroot, uid 9999) 的明文上游（servers.conf 里的 server <ip>）
     # 发往公网 53 会被下面 REDIRECT 劫回 AGH -> smartdns -> 再出站 -> 死环 SERVFAIL。
     # 豁免条件收得很窄：uid 必须是 9999（SmartDNS 专用，netd 之外没别的 uid 9999 常驻
@@ -1197,3 +1173,4 @@ while true; do
 
     sleep 5
 done &
+

@@ -1,9 +1,17 @@
 #!/system/bin/sh
-# 自定义脚本列表 CGI：扫描 /data/adb/agh/scripts/custom
-#   GET /cgi-bin/scripts            -> 列出脚本
-#   GET /cgi-bin/scripts?run=名字   -> 后台执行该脚本（必须是该目录下的普通文件）
-DIR=/data/adb/agh/scripts/custom
-Q="$QUERY_STRING"
+# 重写脚本 CGI（对齐 iOS 小火箭 / Loon / Surge 的插件与脚本格式）
+#   GET /cgi-bin/scripts                  -> 列出脚本与解析统计
+#   GET /cgi-bin/scripts?apply=1          -> 把所有 url-reject / reject 规则汇总成 DNS 拦截表并注册到 AGH
+#
+# 支持的脚本形态（放 /data/adb/agh/scripts/rewrite/）：
+#   *.plugin       Loon 插件 / Surge 模块（[Rule] [URL Rewrite] [Script] 段落）
+#   *.rewrite      Surge / 小火箭 rewrite（^https?://... url reject|reject-200|header|body）
+#   *.js           $httpClient / $response / $request 脚本（只做登记与统计，执行需设备侧 JS 运行时）
+#   *.list         纯域名或 reject 行
+DIR=/data/adb/agh/scripts/rewrite
+OUT=/data/adb/modules/AdGuardHome/rules/脚本拦截.txt
+AGH=http://127.0.0.1:40251
+LOGIN=root:root
 
 cors() {
     printf 'Access-Control-Allow-Origin: *\r\n'
@@ -13,38 +21,67 @@ cors() {
     printf '\r\n'
 }
 case "$REQUEST_METHOD" in OPTIONS) cors; exit 0 ;; esac
-
 mkdir -p "$DIR" 2>/dev/null
 
-case "$Q" in
-    run=*)
-        name=$(printf '%s' "$Q" | sed -n 's/^run=//p' | sed 's/%20/ /g')
-        case "$name" in */*|.*|"") cors; printf '{"ok":false,"error":"bad name"}\n'; exit 0 ;; esac
-        f="$DIR/$name"
-        if [ -f "$f" ]; then
-            chmod 755 "$f" 2>/dev/null
-            setsid sh "$f" </dev/null >>"$DIR/.run.log" 2>&1 &
-            cors; printf '{"ok":true,"ran":"%s"}\n' "$name"
-        else
-            cors; printf '{"ok":false,"error":"not found"}\n'
+# 从各类脚本里抽域名：url reject 行、REJECT 规则、以及裸域名行
+extract_domains() {
+    for f in "$DIR"/*; do
+        [ -f "$f" ] || continue
+        case "$(basename "$f")" in .*) continue ;; esac
+        # ^https?://host/path ... url reject
+        grep -iE '(url-reject|url reject|reject-200|reject-img|reject-dict|reject-array)' "$f" 2>/dev/null \
+            | sed -n 's#.*https\?://\([^/^ ]*\).*#\1#p'
+        # REJECT / REJECT-TINYGIF 规则行：DOMAIN-SUFFIX,host,REJECT
+        grep -iE ',\s*(REJECT|URL-REGEX)' "$f" 2>/dev/null \
+            | awk -F, '{gsub(/ /,"",$2); if ($2 ~ /\./) print $2}'
+        # 裸域名
+        grep -oE '^\|\|[a-zA-Z0-9._-]+\^?$|^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$' "$f" 2>/dev/null
+    done | tr 'A-Z' 'a-z' | sed 's/^\*\.//' | sort -u
+}
+
+case "$QUERY_STRING" in
+    *apply=*)
+        extract_domains > "$OUT.tmp" 2>/dev/null
+        n=$(wc -l < "$OUT.tmp" 2>/dev/null | tr -d ' ')
+        if [ "${n:-0}" -lt 1 ]; then
+            rm -f "$OUT.tmp"
+            cors; printf '{"ok":true,"applied":0,"note":"没有可汇总的 reject 规则"}\n'; exit 0
         fi
+        { echo '! 由重写脚本汇总（url reject / REJECT 规则）'; sed 's/^/||/; s/$/^/' "$OUT.tmp"; } > "$OUT"
+        rm -f "$OUT.tmp"
+        # 注册到 AGH（幂等）
+        curl -s -u "$LOGIN" -H 'Content-Type: application/json' \
+            -d '{"data":{"name":"脚本拦截","url":"/data/adb/modules/AdGuardHome/rules/脚本拦截.txt","enabled":true},"url":"/data/adb/modules/AdGuardHome/rules/脚本拦截.txt","whitelist":false}' \
+            "$AGH/control/filtering/add_url" >/dev/null 2>&1
+        ids=$(curl -s -u "$LOGIN" "$AGH/control/filtering/status" 2>/dev/null | tr ',' '\n' | awk -F: '/"id"/{gsub(/[^0-9]/,"",$2); printf "%s,",$2}' | sed 's/,$//')
+        [ -n "$ids" ] && curl -s -u "$LOGIN" -H 'Content-Type: application/json' -d "{\"ids\":[$ids]}" "$AGH/control/filtering/refresh" >/dev/null 2>&1
+        cors; printf '{"ok":true,"applied":%s,"file":"%s"}\n' "$n" "$OUT"
         exit 0
         ;;
 esac
 
 cors
-printf '{"dir":"%s","scripts":[' "$DIR"
+printf '{"dir":"%s","out":"%s","scripts":[' "$DIR" "$OUT"
 first=1
 for f in "$DIR"/*; do
     [ -f "$f" ] || continue
     b=$(basename "$f")
     case "$b" in .*) continue ;; esac
+    ext=${b##*.}
+    case "$ext" in
+        plugin)  type="插件（Loon/Surge）" ;;
+        rewrite) type="重写（Surge/小火箭）" ;;
+        js)      type="JS 脚本" ;;
+        list)    type="域名表" ;;
+        *)       type="其它" ;;
+    esac
     sz=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
     mt=$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null)
+    rej=$(grep -icE '(url-reject|url reject|,\s*reject)' "$f" 2>/dev/null)
+    mre=$(grep -icE '(http-response|http-request|\$response|\$request)' "$f" 2>/dev/null)
     [ $first -eq 1 ] || printf ','
     first=0
-    printf '{"name":"%s","size":%s,"mtime":"%s","exec":%s}' \
-        "$b" "${sz:-0}" "${mt:-}" \
-        "$( [ -x "$f" ] && echo 1 || echo 0 )"
+    printf '{"name":"%s","type":"%s","ext":"%s","size":%s,"mtime":"%s","reject_rules":%s,"mitm_rules":%s}' \
+        "$b" "$type" "$ext" "${sz:-0}" "${mt:-}" "${rej:-0}" "${mre:-0}"
 done
 printf ']}\n'
