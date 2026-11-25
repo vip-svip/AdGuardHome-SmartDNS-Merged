@@ -1,0 +1,60 @@
+#!/system/bin/sh
+# 证书状态 CGI：读取模块内置 CA 与系统信任库，输出 JSON
+#   GET /cgi-bin/certs
+# 返回：
+#   {"https":{...},"mitm":{...},"system_cacerts":"/system/etc/security/cacerts"}
+MODDIR=/data/adb/modules/AdGuardHome
+CERTDIR="$MODDIR/certs"
+SYS="$MODDIR/system/etc/security/cacerts"
+
+cors() {
+    printf 'Access-Control-Allow-Origin: *\r\n'
+    printf 'Access-Control-Allow-Methods: GET, OPTIONS\r\n'
+    printf 'Access-Control-Allow-Headers: *\r\n'
+    printf 'Content-Type: application/json; charset=utf-8\r\n'
+    printf '\r\n'
+}
+
+case "$REQUEST_METHOD" in
+    OPTIONS) cors; exit 0 ;;
+esac
+
+jstr() { printf '%s' "$1" | tr -d '\r\n' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+one() {
+    _name="$1"; _file="$2"; _hash="$3"; _crt="$CERTDIR/$_file.crt"
+    _subj=""; _iss=""; _exp=""; _fp=""; _inst=0; _size=0
+    if [ -f "$_crt" ]; then
+        _size=$(wc -c < "$_crt" 2>/dev/null | tr -d ' ')
+        # 内置 meta.txt（模块生成时写入），设备没有 openssl 也能显示
+        _mt="$CERTDIR/meta.txt"
+        if [ -f "$_mt" ]; then
+            _subj=$(grep "^$_name.subject=" "$_mt" 2>/dev/null | head -1 | cut -d= -f2-)
+            _iss=$(grep "^$_name.issuer=" "$_mt" 2>/dev/null | head -1 | cut -d= -f2-)
+            _exp=$(grep "^$_name.expires=" "$_mt" 2>/dev/null | head -1 | cut -d= -f2-)
+            _fp=$(grep "^$_name.sha256=" "$_mt" 2>/dev/null | head -1 | cut -d= -f2-)
+        fi
+        if command -v openssl >/dev/null 2>&1; then
+            _subj=$(openssl x509 -in "$_crt" -noout -subject 2>/dev/null | sed 's/^subject=//')
+            _iss=$(openssl x509 -in "$_crt" -noout -issuer 2>/dev/null | sed 's/^issuer=//')
+            _exp=$(openssl x509 -in "$_crt" -noout -enddate 2>/dev/null | sed 's/^notAfter=//')
+            _fp=$(openssl x509 -in "$_crt" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//')
+        else
+            # 无 openssl 时用 busybox 兜底：至少给出可读性信息
+            [ -n "$_subj" ] || _subj=$(grep -m1 -o 'CN=[^,]*' "$_crt" 2>/dev/null)
+        fi
+        [ -f "$SYS/$_hash.0" ] && _inst=1
+        [ -f "/system/etc/security/cacerts/$_hash.0" ] && _inst=1
+    fi
+    printf '"%s":{"name":"%s","hash":"%s","installed":%d,"size":%s,"subject":"%s","issuer":"%s","expires":"%s","sha256":"%s","module_path":"%s","system_path":"/system/etc/security/cacerts/%s.0"}' \
+        "$_name" "$_name" "$_hash" "$_inst" "$_size" \
+        "$(jstr "$_subj")" "$(jstr "$_iss")" "$(jstr "$_exp")" "$(jstr "$_fp")" \
+        "$_crt" "$_hash"
+}
+
+cors
+printf '{'
+one "https" "https-ca" "2c637461"
+printf ','
+one "mitm" "mitm-ca" "e2b6a4fd"
+printf ',"system_cacerts":"/system/etc/security/cacerts","module_certs":"%s"}\n' "$CERTDIR"

@@ -1,0 +1,50 @@
+#!/system/bin/sh
+# 自定义脚本列表 CGI：扫描 /data/adb/agh/scripts/custom
+#   GET /cgi-bin/scripts            -> 列出脚本
+#   GET /cgi-bin/scripts?run=名字   -> 后台执行该脚本（必须是该目录下的普通文件）
+DIR=/data/adb/agh/scripts/custom
+Q="$QUERY_STRING"
+
+cors() {
+    printf 'Access-Control-Allow-Origin: *\r\n'
+    printf 'Access-Control-Allow-Methods: GET, OPTIONS\r\n'
+    printf 'Access-Control-Allow-Headers: *\r\n'
+    printf 'Content-Type: application/json; charset=utf-8\r\n'
+    printf '\r\n'
+}
+case "$REQUEST_METHOD" in OPTIONS) cors; exit 0 ;; esac
+
+mkdir -p "$DIR" 2>/dev/null
+
+case "$Q" in
+    run=*)
+        name=$(printf '%s' "$Q" | sed -n 's/^run=//p' | sed 's/%20/ /g')
+        case "$name" in */*|.*|"") cors; printf '{"ok":false,"error":"bad name"}\n'; exit 0 ;; esac
+        f="$DIR/$name"
+        if [ -f "$f" ]; then
+            chmod 755 "$f" 2>/dev/null
+            setsid sh "$f" </dev/null >>"$DIR/.run.log" 2>&1 &
+            cors; printf '{"ok":true,"ran":"%s"}\n' "$name"
+        else
+            cors; printf '{"ok":false,"error":"not found"}\n'
+        fi
+        exit 0
+        ;;
+esac
+
+cors
+printf '{"dir":"%s","scripts":[' "$DIR"
+first=1
+for f in "$DIR"/*; do
+    [ -f "$f" ] || continue
+    b=$(basename "$f")
+    case "$b" in .*) continue ;; esac
+    sz=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+    mt=$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null)
+    [ $first -eq 1 ] || printf ','
+    first=0
+    printf '{"name":"%s","size":%s,"mtime":"%s","exec":%s}' \
+        "$b" "${sz:-0}" "${mt:-}" \
+        "$( [ -x "$f" ] && echo 1 || echo 0 )"
+done
+printf ']}\n'

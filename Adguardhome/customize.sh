@@ -521,3 +521,8 @@ for _df in "$AGH_DIR/smartdns/etc/smartdns/domain-rules.conf" \
     [ -f "$_df" ] && sed -i "/^[[:space:]]*domain-rules .*→/s/^/#/" "$_df" 2>/dev/null
 done
 i18n_print "- Installation complete. Reboot device." "- 安装完成，请重启设备。"
+
+# ---- 释放内置系统级 CA（HTTPS / MITM）到 systemless overlay ----
+if [ -f "$MODPATH/scripts/certs_install.sh" ]; then
+    MODDIR="$MODPATH" sh "$MODPATH/scripts/certs_install.sh" 2>&1 | while read -r _l; do ui_print "$_l"; done
+fi
