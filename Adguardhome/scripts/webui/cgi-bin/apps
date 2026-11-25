@@ -1,0 +1,93 @@
+#!/system/bin/sh
+# 应用分流 CGI
+#   GET  /cgi-bin/apps                     -> {"apps":[{name,uid,state}...]}  state: normal|bypass|force
+#   GET  /cgi-bin/apps?set=PKG&mode=MODE   -> 写入 绕过/强制 名单并触发规则重建
+# MODE: normal | bypass | force
+DIR=/data/adb/agh
+BYPASS="$DIR/apps_bypass.txt"
+FORCE="$DIR/apps_force.txt"
+CACHE="$DIR/.pm_uids"
+
+cors() {
+    printf 'Access-Control-Allow-Origin: *\r\n'
+    printf 'Access-Control-Allow-Methods: GET, OPTIONS\r\n'
+    printf 'Access-Control-Allow-Headers: *\r\n'
+    printf 'Content-Type: application/json; charset=utf-8\r\n'
+    printf '\r\n'
+}
+case "$REQUEST_METHOD" in OPTIONS) cors; exit 0 ;; esac
+
+touch "$BYPASS" "$FORCE" 2>/dev/null
+
+# 包名 → uid（缓存，packages.xml 更新后失效）
+pm_cache() {
+    _need=0
+    [ -s "$CACHE" ] || _need=1
+    if [ "$_need" = "0" ] && [ -f /data/system/packages.xml ] && [ "$CACHE" -ot /data/system/packages.xml ]; then
+        _need=1
+    fi
+    [ "$_need" = "1" ] && pm list packages -U 2>/dev/null | sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\).*/\1 \2/p' > "$CACHE" 2>/dev/null
+}
+
+state_of() {
+    grep -qx "$1" "$FORCE" 2>/dev/null && { echo force; return; }
+    grep -qx "$1" "$BYPASS" 2>/dev/null && { echo bypass; return; }
+    echo normal
+}
+
+Q="$QUERY_STRING"
+case "$Q" in
+    set=*)
+        pkg=$(printf '%s' "$Q" | sed -n 's/.*set=\([^&]*\).*/\1/p')
+        mode=$(printf '%s' "$Q" | sed -n 's/.*mode=\([^&]*\).*/\1/p')
+        case "$pkg" in ""|*/*|*..*) cors; printf '{"ok":false,"error":"bad package"}\n'; exit 0 ;; esac
+        case "$mode" in normal|bypass|force) ;; *) cors; printf '{"ok":false,"error":"bad mode"}\n'; exit 0 ;; esac
+        pm_cache
+        uid=$(awk -v p="$pkg" '$1==p{print $2; exit}' "$CACHE" 2>/dev/null)
+        [ -n "$uid" ] || { cors; printf '{"ok":false,"error":"uid not found"}\n'; exit 0; }
+        # 只维护自身名单，幂等
+        grep -vx "$uid" "$BYPASS" > "$BYPASS.tmp" 2>/dev/null; mv "$BYPASS.tmp" "$BYPASS" 2>/dev/null
+        grep -vx "$uid" "$FORCE"  > "$FORCE.tmp"  2>/dev/null; mv "$FORCE.tmp"  "$FORCE"  2>/dev/null
+        case "$mode" in
+            bypass) echo "$uid" >> "$BYPASS" ;;
+            force)  echo "$uid" >> "$FORCE" ;;
+        esac
+        setsid sh /data/adb/agh/scripts/iptables.sh --once >/dev/null 2>&1 &
+        cors
+        printf '{"ok":true,"pkg":"%s","uid":"%s","mode":"%s"}\n' "$pkg" "$uid" "$mode"
+        exit 0
+        ;;
+esac
+
+pm_cache
+cors
+printf '{"ok":true,"bypass":[' 
+first=1
+while read -r u; do
+    [ -n "$u" ] || continue
+    [ $first -eq 1 ] || printf ','
+    first=0
+    printf '"%s"' "$u"
+done < "$BYPASS"
+printf '],"force":['
+first=1
+while read -r u; do
+    [ -n "$u" ] || continue
+    [ $first -eq 1 ] || printf ','
+    first=0
+    printf '"%s"' "$u"
+done < "$FORCE"
+printf '],"apps":['
+first=1
+# 只列第三方+常用系统应用，避免一次吐几千条
+awk '{print $1" "$2}' "$CACHE" 2>/dev/null | while read -r pkg uid; do
+    [ -n "$pkg" ] || continue
+    case "$pkg" in
+        android|com.android.*|com.google.android.*|com.miui.*|com.oplus.*) [ -z "$(grep -x "$uid" "$BYPASS" "$FORCE" 2>/dev/null)" ] && continue ;;
+    esac
+    st=$(grep -qx "$uid" "$FORCE" 2>/dev/null && echo force || { grep -qx "$uid" "$BYPASS" 2>/dev/null && echo bypass || echo normal; })
+    [ $first -eq 1 ] || printf ','
+    first=0
+    printf '{"pkg":"%s","uid":"%s","state":"%s"}' "$pkg" "$uid" "$st"
+done
+printf ']}\n'

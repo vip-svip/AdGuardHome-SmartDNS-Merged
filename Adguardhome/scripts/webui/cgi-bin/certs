@@ -15,6 +15,26 @@ cors() {
     printf '\r\n'
 }
 
+# 证书下载：?download=https|mitm 直接吐 PEM（给其它设备导入用）
+case "$QUERY_STRING" in
+    *download=*)
+        _d=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*download=\([a-z]*\).*/\1/p')
+        case "$_d" in
+            https) _f="$CERTDIR/https-ca.crt" ;;
+            mitm)  _f="$CERTDIR/mitm-ca.crt" ;;
+            *) printf 'Content-Type: text/plain\r\n\r\nbad cert\n'; exit 0 ;;
+        esac
+        if [ -f "$_f" ]; then
+            printf 'Content-Type: application/x-x509-ca-cert\r\n'
+            printf 'Content-Disposition: attachment; filename="%s-ca.crt"\r\n' "$_d"
+            printf 'Access-Control-Allow-Origin: *\r\n\r\n'
+            cat "$_f"
+        else
+            printf 'Content-Type: text/plain\r\n\r\nnot found\n'
+        fi
+        exit 0
+        ;;
+esac
 case "$REQUEST_METHOD" in
     OPTIONS) cors; exit 0 ;;
 esac
