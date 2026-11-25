@@ -1,13 +1,18 @@
 #!/system/bin/sh
-# 重写脚本 CGI（对齐 iOS 小火箭 / Loon / Surge 的插件与脚本格式）
-#   GET /cgi-bin/scripts                  -> 列出脚本与解析统计
-#   GET /cgi-bin/scripts?apply=1          -> 把所有 url-reject / reject 规则汇总成 DNS 拦截表并注册到 AGH
+# 重写脚本 CGI —— 支持主流代理客户端/拦截器脚本格式，统一抽域名落成 DNS 拦截
+#   GET  /cgi-bin/scripts                 列表（格式、规则数、启用状态）
+#   GET  /cgi-bin/scripts?apply=1         汇总所有「已启用」脚本的 reject 域名 -> AGH 过滤器
+#   GET  /cgi-bin/scripts?toggle=NAME     启用/停用某个脚本（写 NAME.off 标记）
 #
-# 支持的脚本形态（放 /data/adb/agh/scripts/rewrite/）：
-#   *.plugin       Loon 插件 / Surge 模块（[Rule] [URL Rewrite] [Script] 段落）
-#   *.rewrite      Surge / 小火箭 rewrite（^https?://... url reject|reject-200|header|body）
-#   *.js           $httpClient / $response / $request 脚本（只做登记与统计，执行需设备侧 JS 运行时）
-#   *.list         纯域名或 reject 行
+# 支持的格式（按扩展名 + 内容判定）：
+#   .plugin/.lpx        Loon 插件
+#   .sgmodule           Surge 模块
+#   .conf               Surge / Shadowrocket(小火箭) / Quantumult X 配置
+#   .rewrite            Surge / 小火箭 重写
+#   .js                 QX / Loon / Surge / 小火箭 脚本（$request/$response/$done）
+#   .yaml/.yml          Clash / Clash.Meta 规则
+#   .json               sing-box / V2Ray 路由
+#   .list/.txt/.hosts   hosts、dnsmasq、AdGuard 语法、裸域名
 DIR=/data/adb/agh/scripts/rewrite
 OUT=/data/adb/modules/AdGuardHome/rules/脚本拦截.txt
 AGH=http://127.0.0.1:40251
@@ -23,33 +28,87 @@ cors() {
 case "$REQUEST_METHOD" in OPTIONS) cors; exit 0 ;; esac
 mkdir -p "$DIR" 2>/dev/null
 
-# 从各类脚本里抽域名：url reject 行、REJECT 规则、以及裸域名行
-extract_domains() {
-    for f in "$DIR"/*; do
-        [ -f "$f" ] || continue
-        case "$(basename "$f")" in .*) continue ;; esac
-        # ^https?://host/path ... url reject
-        grep -iE '(url-reject|url reject|reject-200|reject-img|reject-dict|reject-array)' "$f" 2>/dev/null \
-            | sed -n 's#.*https\?://\([^/^ ]*\).*#\1#p'
-        # REJECT / REJECT-TINYGIF 规则行：DOMAIN-SUFFIX,host,REJECT
-        grep -iE ',\s*(REJECT|URL-REGEX)' "$f" 2>/dev/null \
-            | awk -F, '{gsub(/ /,"",$2); if ($2 ~ /\./) print $2}'
-        # 裸域名
-        grep -oE '^\|\|[a-zA-Z0-9._-]+\^?$|^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$' "$f" 2>/dev/null
-    done | tr 'A-Z' 'a-z' | sed 's/^\*\.//' | sort -u
+enabled() { [ -f "$DIR/.$1.off" ] && echo 0 || echo 1; }
+
+fmt_of() {
+    _n="$1"; _e="${_n##*.}"
+    case "$_e" in
+        plugin|lpx) echo "Loon 插件" ;;
+        sgmodule)   echo "Surge 模块" ;;
+        conf)       if grep -q '^\[rewrite_local\]' "$DIR/$_n" 2>/dev/null; then echo "Quantumult X 配置"
+                    elif grep -q '^\[URL Rewrite\]' "$DIR/$_n" 2>/dev/null; then echo "小火箭/Surge 配置"
+                    else echo "代理配置"; fi ;;
+        rewrite)    echo "小火箭/Surge 重写" ;;
+        js)         echo "JS 脚本" ;;
+        yaml|yml)   echo "Clash 规则" ;;
+        json)       if grep -q '"route"' "$DIR/$_n" 2>/dev/null; then echo "sing-box 路由"
+                    elif grep -q '"routing"' "$DIR/$_n" 2>/dev/null; then echo "V2Ray 路由"
+                    else echo "JSON 配置"; fi ;;
+        hosts)      echo "hosts" ;;
+        list)       echo "域名表" ;;
+        txt)        echo "文本规则" ;;
+        *)          echo "其它" ;;
+    esac
 }
 
+# 统一抽域名：覆盖各格式的 reject / 拦截写法
+domains_of() {
+    _f="$DIR/$1"
+    # 1) URL 重写类：^https?://host/... url reject|reject-200|...
+    grep -iE 'url[ -]reject|reject-(200|img|dict|array)|url reject' "$_f" 2>/dev/null \
+        | sed -n 's#.*https\?://\([^/^ ]*\).*#\1#p'
+    # 2) Clash / Surge / 小火箭 / QX 规则行：TYPE,host,REJECT|REJECT-TINYGIF|0.0.0.0
+    grep -iE ',\s*(REJECT|REJECT-TINYGIF|REJECT-DROP|REJECT-NO-DROP)\s*$' "$_f" 2>/dev/null \
+        | awk -F, '{h=$2; gsub(/ /,"",h); print h}'
+    grep -iE '^\s*(DOMAIN-SUFFIX|DOMAIN|HOST-SUFFIX|HOST|HOST-KEYWORD)' "$_f" 2>/dev/null \
+        | awk -F, '{h=$2; gsub(/ /,"",h); print h}'
+    # 3) Quantumult X：hostname = %APPEND% a.com, b.com
+    grep -iE '^\s*hostname\s*=' "$_f" 2>/dev/null | sed 's/.*=//' | tr ',' '\n' \
+        | sed 's/%APPEND%//g; s/[[:space:]]//g'
+    # 4) dnsmasq：address=/host/0.0.0.0
+    grep -iE '^\s*address=/' "$_f" 2>/dev/null | sed 's#.*/\([^/]*\)/.*#\1#'
+    # 5) hosts：0.0.0.0 host / 127.0.0.1 host
+    grep -iE '^\s*(0\.0\.0\.0|127\.0\.0\.1|::1?|::)\s+' "$_f" 2>/dev/null | awk '{print $2}'
+    # 6) sing-box / V2Ray JSON：含 reject 的对象里的 domain/domain_suffix
+    grep -oE '"(domain|domain_suffix|domain_keyword)"\s*:\s*\[[^]]*\]' "$_f" 2>/dev/null \
+        | grep -oE '"[a-zA-Z0-9*._-]+\.[a-zA-Z0-9._-]+"' | tr -d '"'
+    # 7) Clash yaml：- DOMAIN-SUFFIX,host 或 rule: 'DOMAIN,host,REJECT'
+    grep -oE "DOMAIN(-SUFFIX|-KEYWORD)?,[^,']+" "$_f" 2>/dev/null | cut -d, -f2
+    # 8) AdGuard / 裸域名 / 泛域名
+    grep -oE '^\|\|[a-zA-Z0-9*._-]+\^?$' "$_f" 2>/dev/null | tr -d '|^'
+    grep -oE '^(\*\.)?[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$' "$_f" 2>/dev/null
+}
+
+count_reject() { grep -icE 'reject|url[ -]reject|```|address=/' "$DIR/$1" 2>/dev/null; }
+
 case "$QUERY_STRING" in
-    *apply=*)
-        extract_domains > "$OUT.tmp" 2>/dev/null
-        n=$(wc -l < "$OUT.tmp" 2>/dev/null | tr -d ' ')
+    toggle=*)
+        n=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*toggle=\([^&]*\).*/\1/p' | sed 's/%20/ /g')
+        case "$n" in ""|*/*|*..*) cors; printf '{"ok":false,"error":"bad name"}\n'; exit 0 ;; esac
+        [ -f "$DIR/$n" ] || { cors; printf '{"ok":false,"error":"not found"}\n'; exit 0; }
+        if [ -f "$DIR/.$n.off" ]; then rm -f "$DIR/.$n.off"; st=1; else : > "$DIR/.$n.off"; st=0; fi
+        cors; printf '{"ok":true,"name":"%s","enabled":%s}\n' "$n" "$st"
+        exit 0
+        ;;
+    apply=*)
+        tmp=$(mktemp 2>/dev/null || echo /data/adb/agh/.rwtmp)
+        : > "$tmp"
+        for f in "$DIR"/*; do
+            [ -f "$f" ] || continue
+            b=$(basename "$f")
+            case "$b" in .*) continue ;; esac
+            [ -f "$DIR/.$b.off" ] && continue
+            domains_of "$b" >> "$tmp"
+        done
+        sed -i 's/^[[:space:]]*//; s/[[:space:]]*$//' "$tmp" 2>/dev/null
+        tr 'A-Z' 'a-z' < "$tmp" | sed 's/^\*\.//' | grep -E '^[a-z0-9]' | grep -v '^localhost$' | sort -u > "$tmp.u"
+        n=$(wc -l < "$tmp.u" 2>/dev/null | tr -d ' ')
         if [ "${n:-0}" -lt 1 ]; then
-            rm -f "$OUT.tmp"
-            cors; printf '{"ok":true,"applied":0,"note":"没有可汇总的 reject 规则"}\n'; exit 0
+            rm -f "$tmp" "$tmp.u"; : > "$OUT"
+            cors; printf '{"ok":true,"applied":0,"note":"已启用的脚本里没有 reject 规则"}\n'; exit 0
         fi
-        { echo '! 由重写脚本汇总（url reject / REJECT 规则）'; sed 's/^/||/; s/$/^/' "$OUT.tmp"; } > "$OUT"
-        rm -f "$OUT.tmp"
-        # 注册到 AGH（幂等）
+        { echo '! 由脚本页汇总：小火箭/Loon/Surge/QX/Clash/sing-box/V2Ray/hosts/dnsmasq'; sed 's/^/||/; s/$/^/' "$tmp.u"; } > "$OUT"
+        rm -f "$tmp" "$tmp.u"
         curl -s -u "$LOGIN" -H 'Content-Type: application/json' \
             -d '{"data":{"name":"脚本拦截","url":"/data/adb/modules/AdGuardHome/rules/脚本拦截.txt","enabled":true},"url":"/data/adb/modules/AdGuardHome/rules/脚本拦截.txt","whitelist":false}' \
             "$AGH/control/filtering/add_url" >/dev/null 2>&1
@@ -67,21 +126,15 @@ for f in "$DIR"/*; do
     [ -f "$f" ] || continue
     b=$(basename "$f")
     case "$b" in .*) continue ;; esac
-    ext=${b##*.}
-    case "$ext" in
-        plugin)  type="插件（Loon/Surge）" ;;
-        rewrite) type="重写（Surge/小火箭）" ;;
-        js)      type="JS 脚本" ;;
-        list)    type="域名表" ;;
-        *)       type="其它" ;;
-    esac
+    type=$(fmt_of "$b")
     sz=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
     mt=$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null)
-    rej=$(grep -icE '(url-reject|url reject|,\s*reject)' "$f" 2>/dev/null)
-    mre=$(grep -icE '(http-response|http-request|\$response|\$request)' "$f" 2>/dev/null)
+    dn=$(domains_of "$b" | tr 'A-Z' 'a-z' | sed 's/^\*\.//' | grep -E '^[a-z0-9]' | sort -u | wc -l | tr -d ' ')
+    rj=$(count_reject "$b")
+    en=$(enabled "$b")
     [ $first -eq 1 ] || printf ','
     first=0
-    printf '{"name":"%s","type":"%s","ext":"%s","size":%s,"mtime":"%s","reject_rules":%s,"mitm_rules":%s}' \
-        "$b" "$type" "$ext" "${sz:-0}" "${mt:-}" "${rej:-0}" "${mre:-0}"
+    printf '{"name":"%s","type":"%s","size":%s,"mtime":"%s","domains":%s,"reject_rules":%s,"enabled":%s}' \
+        "$b" "$type" "${sz:-0}" "${mt:-}" "${dn:-0}" "${rj:-0}" "$en"
 done
 printf ']}\n'
