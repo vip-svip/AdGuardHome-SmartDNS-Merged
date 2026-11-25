@@ -73,6 +73,13 @@ case "$1" in
         exit 0
         ;;
 esac
+# diag 记录：?diag=accordion|plain
+case "$QUERY_STRING" in
+    *diag=*)
+        echo "$(date +%s) $QUERY_STRING" >> /data/adb/agh/privacy_diag.log 2>/dev/null
+        ;;
+esac
+
 case "$REQUEST_METHOD" in
     OPTIONS) cors ;;
     POST)
