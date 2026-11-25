@@ -188,3 +188,8 @@
 ||onclickmax.com^
 ||clickhits.net^
 ||adfoc.us^
+!----------------广告联盟补充（v6，仅广告域）----------------
+||propellerpops.com^
+||link1s.com^
+||adsterra.org^
+||clickadu.net^

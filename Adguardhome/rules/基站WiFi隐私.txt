@@ -52,3 +52,11 @@
 ! ---- 明确不拦（防呆留档）----
 ! connectivitycheck.gstatic.com / connect.rom.miui.com / api.map.baidu.com /
 ! restapi.amap.com / apis.map.qq.com —— 系统联网检测与导航主接口，拦了会断网或断导航
+! ---- WiFi 定位数据库/IP 归属库补充（v2）----
+||api.wigle.net^
+||api.mylnikov.org^
+||location.api.here.com^
+||pos.here.com^
+! ---- 公共 WiFi 认证/热点接入上报补充 ----
+||wifi.189.cn^
+||hotspot.10086.cn^

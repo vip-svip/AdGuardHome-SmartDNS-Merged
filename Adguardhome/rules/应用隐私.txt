@@ -229,3 +229,16 @@
 ||log.mipush.xiaomi.com^
 ||stat.push.hicloud.com^
 ||logpush.heytapmobi.com^
+! ---- 统计/推送 SDK 端点补充（v2）----
+||uapp.umengcloud.com^
+||ulogs.umengcloud.com^
+||sd.sensorsdata.cn^
+||sc.sensorsdata.cn^
+||vds.growingio.com^
+||sdk.open.phone.igexin.com^
+||gws.getui.com^
+||sdk.jiguang.cn^
+||stats.jpush.cn^
+||gcdsdk.appsflyer.com^
+||app.adjust.com^
+||s2s.adjust.com^

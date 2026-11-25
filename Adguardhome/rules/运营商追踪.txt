@@ -148,3 +148,12 @@
 ||cell.10086.cn^
 ||cell.10010.cn^
 ||cell.189.cn^
+! ---- 运营商内容平台埋点补充（v2）----
+||stat.cmread.com^
+||log.cmread.com^
+||apm.cmvideo.cn^
+||stat.cmvideo.cn^
+||log.tv189.com^
+||stat.tv189.com^
+||stat.chinaunicom.cn^
+||stat.cbncloud.cn^

@@ -741,8 +741,15 @@ sni_chain_up() {
             "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -m owner --uid-owner "$_vu" -j RETURN 2>/dev/null
         done
         "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p tcp --tcp-flags ALL ACK -j RETURN 2>/dev/null
-        # QUIC 拦截：丢 UDP 443 强制回落 TCP（SNI 层才能解析）
-        [ "$_dq" = "true" ] && "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p udp --dport 443 -j DROP 2>/dev/null
+        # QUIC 拦截：UDP 443 与所有 SNI 端口上的 UDP 全丢，强制回落 TCP（SNI 层才解析得到）
+        if [ "$_dq" = "true" ]; then
+            "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p udp --dport 443 -j DROP 2>/dev/null
+            for _qp in $_pl; do
+                case "$_qp" in ""|*[!0-9]*) continue ;; esac
+                [ "$_qp" = "443" ] && continue
+                "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p udp --dport "$_qp" -j DROP 2>/dev/null
+            done
+        fi
         for _pt in $_pl; do
             "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p tcp --dport "$_pt" -j NFQUEUE --queue-num "$_q" --queue-bypass 2>>"$SNI_LOG" || echo "$(date '+%F %T') $_ipt NFQUEUE FAIL dport=[$_pt] q=[$_q] rc=$?" >>"$SNI_LOG"
         done
@@ -752,6 +759,11 @@ sni_chain_up() {
 }
 
 sni_sync_apply() {
+    # 自愈：链被清空或 NFQUEUE 规则缺失时必须立刻重建，否则 SNI/QUIC 层会静默失效
+    if [ "$(iptables -S "$SNI_CHAIN" 2>/dev/null | grep -c NFQUEUE)" -eq 0 ]; then
+        log_vpn "[WARN] AGH_SNI 链缺失，立即重建 SNI 拦截。"
+        sni_chain_apply "$(sni_yaml_val queue_num)" "$(sni_ports_effective)" "$(sni_yaml_val drop_quic)"
+    fi
     # 并发锁：15:16 实测 5 个进程同秒并发 chain_up 导致 v6 链规则堆积 3 遍。
     # set -C 原子创建锁文件，拿不到就等 3 秒重试一次；还拿不到则退出
     # （前一个进程正在动手，state 马上会被更新，本进程下轮 sni_sync 会看到一致状态）。

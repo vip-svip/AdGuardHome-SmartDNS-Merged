@@ -84,3 +84,13 @@
 ||fzzx.10086.cn^
 ||fzzx.10010.cn^
 ||fzzx.189.cn^
+! ---- 系统内置安全/反诈 SDK 补充（v2）----
+||bsb.baidu.com^
+||aq.aliyun.com^
+||sec.aliyun.com^
+||sec.snssdk.com^
+||sec.toutiao.com^
+||12381.cn^
+||safe.baidu.com^
+||anquan.360.cn^
+||sample.360.cn^
