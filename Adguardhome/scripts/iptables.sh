@@ -954,12 +954,18 @@ mitm_uids() {
     grep -oE '^[0-9]+' "$_f" 2>/dev/null | sort -u | tr '\n' ' '
 }
 mitm_redirect_apply() {
+    # 先按行号整批删掉 OUTPUT 上指向 8899 的重定向（避免名单清空后残留）
+    iptables $IPT_W -t nat -L OUTPUT -n --line-numbers 2>/dev/null \
+        | awk '$0 ~ /8899/ && $1 ~ /^[0-9]+$/ {print $1}' | sort -rn \
+        | while read -r _n; do iptables $IPT_W -t nat -D OUTPUT "$_n" 2>/dev/null; done
+    ip6tables $IPT_W -t nat -L OUTPUT -n --line-numbers 2>/dev/null \
+        | awk '$0 ~ /8899/ && $1 ~ /^[0-9]+$/ {print $1}' | sort -rn \
+        | while read -r _n; do ip6tables $IPT_W -t nat -D OUTPUT "$_n" 2>/dev/null; done
+    # 再按名单重建
     for _u in $(mitm_uids); do
         case "$_u" in ""|*[!0-9]*) continue ;; esac
-        iptables $IPT_W -t nat -C OUTPUT -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null || \
-            iptables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
-        ip6tables $IPT_W -t nat -C OUTPUT -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null || \
-            ip6tables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
+        iptables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
+        ip6tables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
     done
 }
 vpn_dns_hijack() {
@@ -1041,6 +1047,7 @@ if [ $ONCE -eq 1 ] || [ $V6ONLY -eq 1 ]; then
         rm -rf "$IPT_LOCK" 2>/dev/null
     else
         rebuild_rules
+    mitm_redirect_apply
     fi
     exit 0
 fi
