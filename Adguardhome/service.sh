@@ -932,6 +932,14 @@ ensure_querylog_off
 # 系统级 CA 幂等安装（HTTP S / MITM），保证 overlay 每次开机都在位
 _certs_sh="$SCRIPT_DIR/certs_install.sh"
 [ -f "$_certs_sh" ] && sh "$_certs_sh" >/dev/null 2>&1 &
+# 改写脚本运行时：aghmitm（用模块内置 MITM CA 做 TLS 解密 + URL 重写）
+# 建 /data/adb/agh/mitm_on 后开机自启，监听 127.0.0.1:8899
+if [ -f "$AGH_DIR/mitm_on" ] && [ -x "$BIN_DIR/aghmitm" ]; then
+    if ! pgrep -f "$BIN_DIR/aghmitm" >/dev/null 2>&1; then
+        _AGHD=$(awk '/^dns:/{f=1} f&&/^[[:space:]]+port:/{print $2; exit}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null)
+        setsid "$BIN_DIR/aghmitm" -listen 127.0.0.1:8899 -rules "$AGH_DIR/scripts/rewrite" -dns "127.0.0.1:${_AGHD:-5353}" >>"$AGH_DIR/mitm.log" 2>&1 &
+fi
+fi
 _privacy_cgi="$SCRIPT_DIR/webui/cgi-bin/privacy"
 if [ -f "$_privacy_cgi" ]; then
     [ -f "$AGH_DIR/privacy.conf" ] || printf 'dns=1\nvpn=1\nip=1\n' > "$AGH_DIR/privacy.conf" 2>/dev/null

@@ -72,7 +72,10 @@ domains_of() {
     # 6) sing-box / V2Ray JSON：含 reject 的对象里的 domain/domain_suffix
     grep -oE '"(domain|domain_suffix|domain_keyword)"\s*:\s*\[[^]]*\]' "$_f" 2>/dev/null \
         | grep -oE '"[a-zA-Z0-9*._-]+\.[a-zA-Z0-9._-]+"' | tr -d '"'
-    # 7) Clash yaml：- DOMAIN-SUFFIX,host 或 rule: 'DOMAIN,host,REJECT'
+    # 5b) hosts：用 awk 判首字段是 IP（toybox grep 不吃 \s）
+    awk '($1=="0.0.0.0"||$1=="127.0.0.1"||$1=="::1"||$1=="::"||$1=="::0"){print $2}' "$_f" 2>/dev/null
+    # 3b) QX/Loon hostname 多值行（逗号切分，去 %APPEND% 与空格）
+    awk 'tolower($1) ~ /^hostname/{print}' "$_f" 2>/dev/null | sed 's/.*=//' | sed 's/%APPEND%//g' | tr ',' '\n' | tr -d ' '    # 7) Clash yaml：- DOMAIN-SUFFIX,host 或 rule: 'DOMAIN,host,REJECT'
     grep -oE "DOMAIN(-SUFFIX|-KEYWORD)?,[^,']+" "$_f" 2>/dev/null | cut -d, -f2
     # 8) AdGuard / 裸域名 / 泛域名
     grep -oE '^\|\|[a-zA-Z0-9*._-]+\^?$' "$_f" 2>/dev/null | tr -d '|^'
