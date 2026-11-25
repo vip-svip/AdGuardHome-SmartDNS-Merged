@@ -1,0 +1,45 @@
+! ============================================================
+! 腾讯广告拦截（内置规则）
+! 来源：OPPO 真机实测整理（广点通/优量汇/腾讯广告联盟）
+! 覆盖 gdt.qq.com、adnet.qq.com、gdtimg 系列 CDN、sdk.e.qq.com 上报、
+! gtimg 头像/图片广告 CDN、AC 广告接口
+! 注意：guid.tpns.tencent.com 是腾讯推送 TPNS 的设备注册域，
+!       若微信/QQ 收不到推送，到仪表盘把这一条单独禁用
+! ============================================================
+
+! ---- 广点通主域与投放接口 ----
+||gdt.qq.com^
+||mi.gdt.qq.com^
+||c2.gdt.qq.com^
+||v2.gdt.qq.com^
+||win.gdt.qq.com^
+
+! ---- 腾讯广告网络 adnet ----
+||adnet.qq.com^
+||api.adnet.qq.com^
+||x.adnet.qq.com^
+
+! ---- 广告素材 CDN（gdtimg / gtimg 广告路径）----
+||gdtimg.com^
+||qzs.gdtimg.com^
+||adsmind.gdtimg.com^
+||pgdt.ugdtimg.com^
+||pgdt.gtimg.cn^
+||xj.gtimg.cn^
+
+! ---- 广告 SDK 上报 ----
+||sdk.e.qq.com^
+||a.ac.qq.com^
+||tdid.m.qq.com^
+||kde.qq.com^
+||mtt.eve.mdt.qq.com^
+
+! ---- 直播/信息流广告 ----
+||info.zb.qq.com^
+||bk.info.zb.qq.com^
+
+! ---- 推送设备标记（会断推送，谨慎）----
+||guid.tpns.tencent.com^
+
+! ---- 聚合广告 SDK（AnyThink）----
+||adx-bj-req.anythinktech.com^

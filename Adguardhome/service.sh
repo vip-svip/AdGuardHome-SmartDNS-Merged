@@ -737,7 +737,7 @@ agh_filter_heal() {
     fi
     # 模块内置的本地过滤器（OPPO 实测同款）：没注册就自动补注册
     # 色情网站/水印/反诈三件套/NoAppDownload/adaway/antiadblock
-    for _bf in 色情网站.txt 水印.txt 反诈.txt 反诈类.txt 反诈和广告.txt NoAppDownload.txt adaway_hosts.txt antiadblockfilters.txt 应用隐私.txt 运营商追踪.txt 反诈上报.txt; do
+    for _bf in 色情网站.txt 水印.txt 反诈.txt 反诈类.txt 反诈和广告.txt NoAppDownload.txt adaway_hosts.txt antiadblockfilters.txt 应用隐私.txt 运营商追踪.txt 反诈上报.txt 腾讯广告.txt; do
         _bfp="$ADGPATH/rules/$_bf"
         [ -f "$_bfp" ] || continue
         if ! printf '%s' "$_st" | grep -qF "$_bf"; then
@@ -752,7 +752,7 @@ agh_filter_heal() {
     # 内置过滤器自动注册后，AGH 用 URL 生成的名字是 "List <id>"，
     # 直接改 yaml 里的 name，仪表盘显示中文名
     _yf="$BIN_DIR/AdGuardHome.yaml"
-    for _nm in 色情网站 水印 反诈 反诈类 反诈和广告 NoAppDownload adaway_hosts antiadblockfilters 拦截列表 应用隐私 运营商追踪 反诈上报; do
+    for _nm in 色情网站 水印 反诈 反诈类 反诈和广告 NoAppDownload adaway_hosts antiadblockfilters 拦截列表 应用隐私 运营商追踪 反诈上报 腾讯广告; do
         _lid=$(awk '/rules\/'"$_nm"'\.txt$/{getline; getline; if ($1=="id:") print $2}' "$_yf" 2>/dev/null)
         [ -n "$_lid" ] || continue
         sed -i "s/name: List $_lid/name: $_nm/" "$_yf" 2>/dev/null
