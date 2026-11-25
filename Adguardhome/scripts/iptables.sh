@@ -214,6 +214,17 @@ V6ONLY=0
 # 切换 v6_dns 模式时绝不能顺手把 v4 劫持拆掉 —— 那几百毫秒 DNS 是裸奔的。
 [ "$1" = "--v6" ] && V6ONLY=1
 
+# --v6selftest：只做一次 v6 环境自检就退出。service.sh 会 `sh iptables.sh --v6selftest &` 调它，
+# 原来没这个分支 -> 直接掉进下面的守护循环，等于每次开机多起一个常驻守护，规则反复重建把机器拖卡。
+if [ "$1" = "--v6selftest" ]; then
+    if ip6tables "$IPT_W" -t nat -L >/dev/null 2>&1; then
+        echo "[v6] 内核支持 ip6tables nat，保持 v6 拦截。"
+    else
+        echo "[v6] 内核无 ip6tables nat，跳过 v6 拦截。"
+    fi
+    exit 0
+fi
+
 # 已有守护在跑就退出（--once / --v6 例外，它们就是要跟守护并存跑一次）
 # 已有守护在跑就退出（--once / --v6 例外，它们就是要跟守护并存跑一次）。
 # 不用 pgrep -f "$0"：命令替换子壳与本守护同 cmdline 会被数进去；

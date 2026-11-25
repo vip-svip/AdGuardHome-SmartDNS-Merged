@@ -39,6 +39,16 @@ _daemon_pid() {
     return 1
 }
 
+# 单实例：只允许一个 ModuleMOD 在跑（否则每次开机多一个，两个循环同时改描述/拉守护）
+MM_PIDF=/data/adb/agh/.modulemod.pid
+if [ -f "$MM_PIDF" ]; then
+    _mp=$(cat "$MM_PIDF" 2>/dev/null)
+    if [ -n "$_mp" ] && [ "$_mp" != "$$" ] && [ -d "/proc/$_mp" ]; then
+        echo "[INFO] ModuleMOD 已在运行(pid=$_mp)，本次退出。"
+        exit 0
+    fi
+fi
+echo $$ > "$MM_PIDF"
 _keep_alive() {
     _d=$(_daemon_pid)
     if [ -z "$_d" ]; then
