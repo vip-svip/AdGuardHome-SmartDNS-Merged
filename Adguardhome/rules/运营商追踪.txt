@@ -121,3 +121,30 @@
 ||track.tyread.cn^
 ||stat.bestv.com.cn^
 ||log.miguvideo.cn^
+! ---- 移动 追踪/链路探针补充 ----
+||trace.10086.cn^
+||apm.10086.cn^
+||log.cmpassport.com^
+||stat.cmpassport.com^
+
+! ---- 联通 追踪/链路探针补充 ----
+||trace.10010.cn^
+||apm.10010.com^
+
+! ---- 电信 追踪/链路探针补充 ----
+||trace.189.cn^
+||apm.21cn.com^
+
+! ---- 广电 追踪/链路探针补充 ----
+||trace.cbn.cn^
+
+! ---- 运营商 WiFi / 热点认证上报（不断认证，只断数据上报）----
+||wifi.10086.cn^
+||wifi.189.cn^
+||wlan.10010.cn^
+||autowifi.189.cn^
+
+! ---- 基站/蜂窝信息上报（防基站定位与画像，GPS 与通话不受影响）----
+||cell.10086.cn^
+||cell.10010.cn^
+||cell.189.cn^

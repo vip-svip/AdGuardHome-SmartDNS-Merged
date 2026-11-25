@@ -46,3 +46,41 @@
 ! ---- 反诈短信短链服务 ----
 ||96110.cn^
 ||fzzx110.cn^
+! ---- 国家反诈平台补充子域（App 更新/日志/上报）----
+||update.gjfzpt.cn^
+||log.gjfzpt.cn^
+||report.gjfzpt.cn^
+||data.gjfzpt.cn^
+
+! ---- 系统内置安全 / 反诈 SDK（小米 HyperOS）----
+||srv.sec.miui.com^
+||flash.sec.miui.com^
+||virus-engine.sec.miui.com^
+||fraud-detection.engine.miui.com^
+||detection-aigc.engine.miui.com^
+||framework.sec.miui.com^
+||tracking.sec.miui.com^
+||mitv.tracking.miui.com^
+
+! ---- 系统内置安全 SDK（OPPO / 一加 / realme）----
+||sec.oppo.com^
+||safe.oppomobile.com^
+||sec.heytapmobi.com^
+||safe.heytapmobi.com^
+
+! ---- 系统内置安全 SDK（vivo / 华为 / 荣耀）----
+||security.vivo.com.cn^
+||sec.huawei.com^
+||sec.hihonor.com^
+
+! ---- 举报平台与反诈短链（与你主动举报无关，只断自动上报）----
+||12321.cn^
+||12377.cn^
+||cyberpolice.cn^
+||fanzha.360.cn^
+||fanzha.baidu.com^
+
+! ---- 运营商反诈拦截/提醒补充 ----
+||fzzx.10086.cn^
+||fzzx.10010.cn^
+||fzzx.189.cn^

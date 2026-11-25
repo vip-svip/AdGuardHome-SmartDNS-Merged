@@ -160,3 +160,31 @@
 
 !----------------明确放行：媒体/图片/视频 CDN（防误伤，不在 DNS 层拦）----------------
 ! 以下域名族绝不加入拦截：phncdn / ahcdn / xxxcdn / hdzogcdn / javcdn / 各家 tube 的视频与图片 CDN
+!----------------广告联盟/弹窗补充（v5，仅广告域，不含任何媒体）----------------
+||adnium.com^
+||adspy.de^
+||adsupply.com^
+||adtrue.com^
+||exoclick.net^
+||exosrv.net^
+||trafficjunky.com^
+||juicyads.co^
+||clicksfly.com^
+||popin.cc^
+||popunderjs.com^
+
+!----------------短链跳板补充（v5）----------------
+||shrinke.me^
+||shortearn.eu^
+||ez4short.com^
+||cuty.io^
+||tii.ai^
+||za.gl^
+||megaurl.in^
+||clk.sh^
+||ouo.press^
+
+!----------------填充/插页脚本（v5）----------------
+||onclickmax.com^
+||clickhits.net^
+||adfoc.us^

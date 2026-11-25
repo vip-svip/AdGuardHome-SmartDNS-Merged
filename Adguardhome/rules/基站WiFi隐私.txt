@@ -1,0 +1,54 @@
+! ============================================================
+! 基站与 WiFi 隐私防护（独立规则，可单独停用）
+! 目标：拦住「把周边 WiFi 列表 / 基站信息发出去做定位与画像」的上报通道
+! 说明：
+!  1. GPS 定位、地图导航、系统联网检测（connectivitycheck / connect.rom.miui.com）
+!     一律不拦，否则会断网或断导航；
+!  2. 只拦 WiFi 定位聚合商（Skyhook / Mozilla / Combain / Unwired Labs）、
+!     WiFi 钥匙类共享上报、运营商 WiFi 探针与热点认证上报、基站信息上报；
+!  3. 运营商通道（cell/wifi/cmpassport）与「运营商追踪」规则互为补充，
+!     想彻底防运营商画像建议两条规则同时开启。
+! ============================================================
+
+! ---- WiFi 定位聚合商（系统把周边 WiFi 列表发出去换坐标的通道）----
+||location.services.mozilla.com^
+||skyhookwireless.com^
+||api.skyhookwireless.com^
+||combain.com^
+||unwiredlabs.com^
+||locationapi.unwiredlabs.com^
+||beacondb.net^
+||api.beacondb.net^
+
+! ---- WiFi 钥匙类共享/热点数据上报 ----
+||51y5.net^
+||wifiapi.51y5.net^
+||wifi.51y5.net^
+||wifikey.51y5.net^
+||wifi.com^
+||wifimasterkey.com^
+
+! ---- 公共 WiFi 认证 / 探针 / 门户上报 ----
+||portal.10086.cn^
+||portal.10010.cn^
+||portal.189.cn^
+||autowifi.10086.cn^
+||wifi.10010.cn^
+||wlan.189.cn^
+
+! ---- 基站 / 蜂窝信息上报（不影响通话与短信）----
+||cell.10086.cn^
+||cell.10010.cn^
+||cell.189.cn^
+||lac.10086.cn^
+||cid.10086.cn^
+
+! ---- 地图厂商的定位数据上报子域（不碰导航主 API）----
+||loc.map.baidu.com^
+||loc.amap.com^
+||mps.amap.com^
+||rtt.qq.com^
+
+! ---- 明确不拦（防呆留档）----
+! connectivitycheck.gstatic.com / connect.rom.miui.com / api.map.baidu.com /
+! restapi.amap.com / apis.map.qq.com —— 系统联网检测与导航主接口，拦了会断网或断导航

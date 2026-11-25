@@ -38,7 +38,7 @@ MAIN_LOG="$AGH_DIR/agh.log"
 # ---------------------------------------------------------------
 
 # 老版 config.prop 里可能没有这些键，给默认值
-[ -n "$vpn_compat" ] || vpn_compat=auto
+[ -n "$vpn_compat" ] || vpn_compat=proxy
 [ -n "$vpn_apps" ] || vpn_apps=""
 
 # ---------------------------------------------------------------
@@ -935,7 +935,7 @@ last_vpnstate="__init__"
 if [ $ONCE -eq 1 ] || [ $V6ONLY -eq 1 ]; then
     if [ $V6ONLY -eq 1 ]; then
         . "$AGH_DIR/scripts/config.prop"
-        [ -n "$vpn_compat" ] || vpn_compat=auto
+        [ -n "$vpn_compat" ] || vpn_compat=proxy
         [ -n "$v6_dns" ] || v6_dns=auto
         _vifs=$(vpn_ifaces)
         _yield=0
@@ -963,7 +963,7 @@ while true; do
     date +%s > "$AGH_DIR/.daemon_hb" 2>/dev/null
     echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
     . "$AGH_DIR/scripts/config.prop"
-    [ -n "$vpn_compat" ] || vpn_compat=auto
+    [ -n "$vpn_compat" ] || vpn_compat=proxy
     [ -n "$vpn_apps" ] || vpn_apps=""
     [ -n "$v6_dns" ] || v6_dns=auto
     sync_redir_port

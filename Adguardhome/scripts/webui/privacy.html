@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>高级设置 · 隐私防护</title>
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--text:#2b2b2b;--muted:#6b7280;--line:#e5e7eb;--accent:#67b279;--accent-dim:#9aa0a6;--btn:#eef1f4}
+@media (prefers-color-scheme:dark){:root{--bg:#111418;--card:#1b2026;--text:#e8eaed;--muted:#9aa0a6;--line:#2a3138;--accent:#5fbf82;--btn:#232a31}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:20px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 18px 6px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.row{display:flex;align-items:flex-start;gap:14px;padding:14px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.row .t{font-weight:600;margin-bottom:4px}
+.row .d{color:var(--muted);font-size:13px}
+.row .c{margin-left:auto;flex:0 0 auto}
+button.sw{min-width:86px;border:1px solid transparent;border-radius:999px;padding:8px 14px;font-size:14px;cursor:pointer;transition:.15s}
+button.on{background:var(--accent);color:#0b1a10}
+button.off{background:var(--btn);color:var(--muted)}
+h2{font-size:15px;margin:26px 0 10px}
+.links{display:flex;flex-wrap:wrap;gap:8px}
+.links a{display:inline-block;padding:8px 12px;border:1px solid var(--line);border-radius:8px;color:var(--text);text-decoration:none;font-size:13px;background:var(--card)}
+.links a:hover{border-color:var(--accent)}
+.note{color:var(--muted);font-size:12px;margin-top:14px}
+.msg{font-size:13px;margin-top:10px;min-height:18px}
+.msg.ok{color:var(--accent)}
+.msg.err{color:#e06c75}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>高级设置 · 隐私防护</h1>
+  <div class="sub">防 DNS 泄露 / 防 VPN 泄露 / 防 IP 泄露 · 由本机 iptables 与 AGH 解析链生效</div>
+  <div class="card" id="rows"></div>
+
+  <h2>一键过检测</h2>
+  <div class="links">
+    <a href="https://browserleaks.com/dns" target="_blank" rel="noreferrer">DNS 泄露检测</a>
+    <a href="https://browserleaks.com/webrtc" target="_blank" rel="noreferrer">WebRTC 泄露检测</a>
+    <a href="https://ipleak.net/" target="_blank" rel="noreferrer">IP / 位置检测</a>
+    <a href="https://browserleaks.com/ip" target="_blank" rel="noreferrer">综合检测</a>
+  </div>
+  <div class="note">说明：本页只控制本机网络泄露面（DNS / WebRTC / IP）。出口 IP 归属由你的网络决定，检测站仍会看到当前公网 IP。</div>
+  <div class="msg" id="msg"></div>
+</div>
+<script>
+var ITEMS = [
+  {k:'dns', t:'防止 DNS 泄露', d:'丢弃 mDNS / SSDP / NetBIOS 探针，解析全部强制走 AGH 加密上游，检测站看不到运营商 DNS。'},
+  {k:'vpn', t:'防止 VPN 泄露', d:'阻断 STUN / TURN 与 Teredo 隧道协商，WebRTC 暴露不出真实出口；VPN 断开也不回落本地网络。'},
+  {k:'ip',  t:'防止 IP 泄露', d:'屏蔽 WebRTC ICE 所需 STUN 端口，网站拿不到局域网 IP 与公网映射地址。'}
+];
+var state = {dns:1,vpn:1,ip:1};
+var msg = document.getElementById('msg');
+function render(){
+  var box = document.getElementById('rows');
+  box.innerHTML = ITEMS.map(function(it){
+    var on = state[it.k] ? 'on' : 'off';
+    var label = state[it.k] ? '已开启' : '已关闭';
+    return '<div class="row"><div><div class="t">'+it.t+'</div><div class="d">'+it.d+'</div></div>'+
+      '<div class="c"><button class="sw '+on+'" data-k="'+it.k+'">'+label+'</button></div></div>';
+  }).join('');
+  Array.prototype.forEach.call(box.querySelectorAll('button.sw'), function(b){
+    b.onclick = function(){ toggle(b.getAttribute('data-k')); };
+  });
+}
+function load(){
+  fetch('/cgi-bin/privacy?t='+Date.now()).then(function(r){return r.json();}).then(function(j){
+    state = {dns:j.dns|0, vpn:j.vpn|0, ip:j.ip|0}; render(); msg.textContent='';
+  }).catch(function(){ msg.className='msg err'; msg.textContent='读取状态失败：隐私守护脚本未就绪'; });
+}
+function toggle(k){
+  var next = {dns:state.dns, vpn:state.vpn, ip:state.ip};
+  next[k] = state[k] ? 0 : 1;
+  state = next; render();
+  fetch('/cgi-bin/privacy', {method:'POST', headers:{'Content-Type':'text/plain'}, body:'dns='+next.dns+'&vpn='+next.vpn+'&ip='+next.ip})
+    .then(function(r){return r.json();}).then(function(j){
+      state = {dns:j.dns|0, vpn:j.vpn|0, ip:j.ip|0}; render();
+      msg.className='msg ok'; msg.textContent='已生效';
+    }).catch(function(){ msg.className='msg err'; msg.textContent='应用失败，请确认 6081 服务在运行'; });
+}
+load();
+</script>
+</body>
+</html>
