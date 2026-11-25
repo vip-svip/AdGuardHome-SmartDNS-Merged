@@ -24,6 +24,7 @@ write_prop() {
 }
 
 # 语言检测：语言变更时更新模块说明
+
 while true; do
     CURRENT_LOCALE=$(getprop persist.sys.locale)
     [ -z "$CURRENT_LOCALE" ] && CURRENT_LOCALE="zh"

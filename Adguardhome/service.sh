@@ -846,7 +846,8 @@ start_agh_locked() {
             if [ -f "$bak" ]; then cp -f "$bak" "$BIN_DIR/AdGuardHome.yaml"; break; fi
         done
     fi
-    "$BIN_DIR/AdGuardHome" --no-check-update </dev/null >>"$AGH_DIR/agh-stdout.log" 2>&1 &
+    # 学 SmartDNS：setsid 起独立会话/进程组，避免被外层进程组的冻结/清理连带
+    setsid "$BIN_DIR/AdGuardHome" --no-check-update </dev/null >>"$AGH_DIR/agh-stdout.log" 2>&1 &
     sleep 1
     if agh_running; then
         [ "$lang" = "zh" ] && log "AdGuardHome 启动成功。" || log "AdGuardHome started successfully."

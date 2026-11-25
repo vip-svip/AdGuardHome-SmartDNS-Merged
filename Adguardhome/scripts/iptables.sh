@@ -270,7 +270,8 @@ start_agh() {
         rm -f "$BIN_DIR/data/sessions.db" "$BIN_DIR/data/sessions.db-wal" "$BIN_DIR/data/sessions.db-shm" 2>/dev/null
         echo "$(date '+%F %T') [WARN] AGH 上次因会话库打开超时退出，已清理 sessions.db 后重启。" >> "$MAIN_LOG"
     fi
-    "$BIN_DIR/AdGuardHome" --no-check-update >/dev/null 2>&1 &
+    # 学 SmartDNS：setsid 起独立会话/进程组，ColorOS 按进程组冻结时不会连带 AGH
+    setsid "$BIN_DIR/AdGuardHome" --no-check-update </dev/null >/dev/null 2>&1 &
     sleep 0.3
     # 永不 OOM：ColorOS 低内存清理对后台进程下手，AGH 优先级顶到 -1000
     for _p in $(pidof AdGuardHome 2>/dev/null); do
