@@ -759,10 +759,20 @@ sni_chain_up() {
 }
 
 sni_sync_apply() {
-    # 自愈：链被清空或 NFQUEUE 规则缺失时必须立刻重建，否则 SNI/QUIC 层会静默失效
-    if [ "$(iptables -S "$SNI_CHAIN" 2>/dev/null | grep -c NFQUEUE)" -eq 0 ]; then
-        log_vpn "[WARN] AGH_SNI 链缺失，立即重建 SNI 拦截。"
-        sni_chain_apply "$(sni_yaml_val queue_num)" "$(sni_ports_effective)" "$(sni_yaml_val drop_quic)"
+    # 自愈：链被清空 / NFQUEUE 缺失 / QUIC 全端口 DROP 不齐，都必须立刻重建（否则 SNI、QUIC 层静默失效）
+    _heal_n=$(iptables -S "$SNI_CHAIN" 2>/dev/null | grep -c NFQUEUE)
+    _heal_q=$(iptables -S "$SNI_CHAIN" 2>/dev/null | grep -c "udp.*DROP")
+    _heal_want=$(sni_ports_effective | tr "," " " | wc -w)
+    if [ "$_heal_n" -eq 0 ] || [ "$_heal_q" -lt "$_heal_want" ]; then
+        log_vpn "[WARN] AGH_SNI 链不完整（NFQUEUE=$_heal_n UDP_DROP=$_heal_q 期望=$_heal_want），立即重建。"
+        _hw="$(sni_want)"
+        case "$_hw" in
+            1\|*)
+                _hq=$(echo "$_hw" | awk -F"|" "{print \$2}")
+                _hp=$(echo "$_hw" | awk -F"|" "{print \$3}")
+                _hd=$(echo "$_hw" | awk -F"|" "{print \$4}")
+                sni_chain_up "$_hq" "$_hp" "$_hd" ;;
+        esac
     fi
     # 并发锁：15:16 实测 5 个进程同秒并发 chain_up 导致 v6 链规则堆积 3 遍。
     # set -C 原子创建锁文件，拿不到就等 3 秒重试一次；还拿不到则退出
@@ -802,6 +812,21 @@ sni_sync_apply() {
 }
 
 sni_sync() {
+    # 链完整性自愈：链被 -F / 重装 / 其他脚本清掉时，状态文件仍写着"已开启"，
+    # 只查链是否存在（-L）会误判为正常，所以这里显式核对 NFQUEUE 与 QUIC DROP 条数。
+    _c_n=$(iptables -S "$SNI_CHAIN" 2>/dev/null | grep -c NFQUEUE)
+    _c_q=$(iptables -S "$SNI_CHAIN" 2>/dev/null | grep -c "udp.*DROP")
+    _c_need=$(sni_ports_effective | tr "," " " | wc -w)
+    if [ -f "$SNI_STATE" ] && [ "$(cut -c1 "$SNI_STATE" 2>/dev/null)" = "1" ]; then
+        if [ "$_c_n" -eq 0 ] || [ "$_c_q" -lt "$_c_need" ]; then
+            log_vpn "[WARN] AGH_SNI 链不完整（NFQUEUE=$_c_n QUIC=$_c_q 期望=$_c_need），立即重建。"
+            _hw="$(sni_want)"
+            case "$_hw" in
+                1\|*)
+                    sni_chain_up "$(echo "$_hw" | awk -F"|" "{print \$2}")" "$(echo "$_hw" | awk -F"|" "{print \$3}")" "$(echo "$_hw" | awk -F"|" "{print \$4}")" ;;
+            esac
+        fi
+    fi
     _want="$(sni_want)"
     _cur="$(cat "$SNI_STATE" 2>/dev/null)"
     if [ "$_want" = "$_cur" ]; then
