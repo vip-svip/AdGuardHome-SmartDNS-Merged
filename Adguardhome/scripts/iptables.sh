@@ -946,6 +946,22 @@ rebuild_rules_raw() {
 IPT_LOCK="$AGH_DIR/.ipt.lock"
 # VPN 隧道内的 DNS 也要进 AGH：tun/wg 侧的 53 一律 REDIRECT 到 AGH 端口，
 # 这样 Clash/V2Ray 这类 tun 客户端替应用解析时，广告域名照样被 AGH 拦掉。
+# 应用级透明分流：mitm_uids.txt 里的 uid，其 443 直接 REDIRECT 到 aghmitm（127.0.0.1:8899）
+# 放在 OUTPUT 最前面，先于 DNS/SNI 链，保证这些应用的 TLS 走 MITM 解密
+mitm_uids() {
+    _f=/data/adb/agh/mitm_uids.txt
+    [ -f "$_f" ] || return 0
+    grep -oE '^[0-9]+' "$_f" 2>/dev/null | sort -u | tr '\n' ' '
+}
+mitm_redirect_apply() {
+    for _u in $(mitm_uids); do
+        case "$_u" in ""|*[!0-9]*) continue ;; esac
+        iptables $IPT_W -t nat -C OUTPUT -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null || \
+            iptables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
+        ip6tables $IPT_W -t nat -C OUTPUT -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null || \
+            ip6tables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
+    done
+}
 vpn_dns_hijack() {
     _vifs=$(vpn_ifaces 2>/dev/null)
     [ -n "$_vifs" ] || return 0
@@ -1141,6 +1157,8 @@ while true; do
 
     # SNI 开关同步（仪表盘 sni_filter.enabled 驱动，5 秒一轮，状态不变不动 iptables）
     sni_sync
+    mitm_redirect_apply
+    vpn_dns_hijack
 
     # ---- 解析自愈看门狗 ----
     # 真机上偶尔会进入「链看着没问题、但系统解析全挂」的状态；实测把劫持链

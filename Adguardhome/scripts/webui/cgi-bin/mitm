@@ -1,0 +1,61 @@
+#!/system/bin/sh
+# MITM 运行时控制 CGI
+#   GET /cgi-bin/mitm                      状态：进程、端口、已接管 uid 数、规则数
+#   GET /cgi-bin/mitm?cmd=on|off           启停（写/删 mitm_on，启停 aghmitm 进程）
+#   GET /cgi-bin/mitm?add=PKG / ?del=PKG   按包名增删「透明接管」名单（写 mitm_uids.txt 并重建）
+DIR=/data/adb/agh
+BIN=/data/adb/modules/AdGuardHome/bin/aghmitm
+UIDF="$DIR/mitm_uids.txt"
+LOG="$DIR/mitm.log"
+
+cors() {
+    printf 'Access-Control-Allow-Origin: *\r\n'
+    printf 'Access-Control-Allow-Methods: GET, OPTIONS\r\n'
+    printf 'Access-Control-Allow-Headers: *\r\n'
+    printf 'Content-Type: application/json; charset=utf-8\r\n'
+    printf '\r\n'
+}
+case "$REQUEST_METHOD" in OPTIONS) cors; exit 0 ;; esac
+touch "$UIDF" 2>/dev/null
+
+pkg_uid() {
+    _c="$DIR/.pm_uids"
+    [ -s "$_c" ] || pm list packages -U 2>/dev/null | sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\).*/\1 \2/p' > "$_c" 2>/dev/null
+    awk -v p="$1" '$1==p{print $2; exit}' "$_c" 2>/dev/null
+}
+
+Q="$QUERY_STRING"
+case "$Q" in
+    cmd=on*)
+        : > "$DIR/mitm_on"
+        pidof aghmitm >/dev/null 2>&1 || {
+            DP=$(awk '/^dns:/{f=1} f&&/^[[:space:]]+port:/{print $2; exit}' /data/adb/modules/AdGuardHome/bin/AdGuardHome.yaml 2>/dev/null)
+            setsid "$BIN" -listen 127.0.0.1:8899 -rules "$DIR/scripts/rewrite" -dns "127.0.0.1:${DP:-5353}" >>"$LOG" 2>&1 &
+        }
+        sleep 1
+        cors; printf '{"ok":true,"running":%s}\n' "$([ -n "$(pidof aghmitm)" ] && echo 1 || echo 0)"
+        exit 0 ;;
+    cmd=off*)
+        rm -f "$DIR/mitm_on"
+        pidof aghmitm | xargs -r kill 2>/dev/null
+        cors; printf '{"ok":true,"running":0}\n'
+        exit 0 ;;
+    add=*|del=*)
+        pkg=$(printf '%s' "$Q" | sed -n 's/^\(add\|del\)=\([^&]*\).*/\2/p')
+        op=${Q%%=*}
+        case "$pkg" in ""|*/*|*..*) cors; printf '{"ok":false,"error":"bad pkg"}\n'; exit 0 ;; esac
+        u=$(pkg_uid "$pkg")
+        [ -n "$u" ] || { cors; printf '{"ok":false,"error":"uid not found"}\n'; exit 0; }
+        grep -vx "$u" "$UIDF" > "$UIDF.t" 2>/dev/null; mv "$UIDF.t" "$UIDF" 2>/dev/null
+        [ "$op" = "add" ] && echo "$u" >> "$UIDF"
+        setsid sh "$DIR/scripts/iptables.sh" --once >/dev/null 2>&1 &
+        cors; printf '{"ok":true,"pkg":"%s","uid":"%s","mode":"%s"}\n' "$pkg" "$u" "$op"
+        exit 0 ;;
+esac
+
+pid=$(pidof aghmitm 2>/dev/null)
+n=$(grep -c . "$UIDF" 2>/dev/null)
+r=$(grep -c 'url' "$DIR/scripts/rewrite"/* 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+cors
+printf '{"running":%s,"pid":"%s","port":8899,"uids":%s,"rules":%s,"log":"%s"}\n' \
+    "$([ -n "$pid" ] && echo 1 || echo 0)" "${pid:-}" "${n:-0}" "${r:-0}" "$LOG"
