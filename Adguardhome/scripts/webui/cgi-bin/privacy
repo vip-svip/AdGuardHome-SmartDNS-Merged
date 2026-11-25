@@ -1,0 +1,101 @@
+#!/system/bin/sh
+# 隐私防护 CGI：读写 /data/adb/agh/privacy.conf 并即时应用 iptables 规则
+# GET  -> {"dns":1,"vpn":1,"ip":1,"applied":1}
+# POST -> body 形如 dns=1&vpn=0&ip=1 （Content-Type: text/plain，避免预检）
+CONF=/data/adb/agh/privacy.conf
+CHAIN=AGH_PRIV
+
+cors() {
+    printf 'Access-Control-Allow-Origin: *\r\n'
+    printf 'Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n'
+    printf 'Access-Control-Allow-Headers: *\r\n'
+    printf 'Content-Type: application/json; charset=utf-8\r\n'
+    printf '\r\n'
+}
+
+load_conf() {
+    DNS=1; VPN=1; IP=1
+    [ -f "$CONF" ] || return 0
+    DNS=$(sed -n 's/^dns=//p' "$CONF" 2>/dev/null | head -1); [ -n "$DNS" ] || DNS=1
+    VPN=$(sed -n 's/^vpn=//p' "$CONF" 2>/dev/null | head -1); [ -n "$VPN" ] || VPN=1
+    IP=$(sed -n 's/^ip=//p'  "$CONF" 2>/dev/null | head -1); [ -n "$IP" ]  || IP=1
+}
+
+save_conf() {
+    printf 'dns=%s\nvpn=%s\nip=%s\n' "$DNS" "$VPN" "$IP" > "$CONF" 2>/dev/null
+}
+
+ipt() { iptables -w 2 "$@" 2>/dev/null || iptables "$@" 2>/dev/null; }
+ipt6() { ip6tables -w 2 "$@" 2>/dev/null || ip6tables "$@" 2>/dev/null; }
+
+apply() {
+    ipt -N $CHAIN
+    ipt -F $CHAIN
+    # 放行本机与已建立连接
+    ipt -A $CHAIN -o lo -j RETURN
+    ipt -A $CHAIN -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    # 防 DNS 泄露：内网 mDNS/LLMNR 探针外发一律丢弃（本机 53 已被 nat 劫持到 AGH）
+    if [ "$DNS" = "1" ]; then
+        ipt -A $CHAIN -p udp --dport 5353 -j DROP
+        ipt -A $CHAIN -p udp --dport 1900 -j DROP
+        ipt -A $CHAIN -p udp --dport 137 -j DROP
+        ipt6 -N $CHAIN
+        ipt6 -F $CHAIN
+        ipt6 -A $CHAIN -o lo -j RETURN
+        ipt6 -A $CHAIN -p udp --dport 5353 -j DROP
+        ipt6 -A $CHAIN -p udp --dport 1900 -j DROP
+    else
+        ipt6 -F $CHAIN
+    fi
+    # 防 VPN/IP 泄露：阻断 STUN/TURN，WebRTC 拿不到公网与本地 IP
+    if [ "$VPN" = "1" ] || [ "$IP" = "1" ]; then
+        for p in 3478 3479 5349 5350; do
+            ipt -A $CHAIN -p udp --dport $p -j DROP
+            ipt -A $CHAIN -p tcp --dport $p -j DROP
+            ipt6 -A $CHAIN -p udp --dport $p -j DROP
+            ipt6 -A $CHAIN -p tcp --dport $p -j DROP
+        done
+    fi
+    # IPv6 泄露面：VPN 开启时阻断 v6 隧道协商用的 Teredo/6to4
+    if [ "$VPN" = "1" ]; then
+        ipt6 -A $CHAIN -p udp --dport 3544 -j DROP
+        ipt -A $CHAIN -p 41 -j DROP
+    fi
+    # 挂到 OUTPUT（幂等）
+    ipt -C OUTPUT -j $CHAIN || ipt -I OUTPUT 1 -j $CHAIN
+    ipt6 -C OUTPUT -j $CHAIN 2>/dev/null || ipt6 -I OUTPUT 1 -j $CHAIN 2>/dev/null
+}
+
+case "$1" in
+    --apply)
+        load_conf
+        apply
+        exit 0
+        ;;
+esac
+case "$REQUEST_METHOD" in
+    OPTIONS) cors ;;
+    POST)
+        body=""
+        if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ] 2>/dev/null; then
+            body=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+        fi
+        load_conf
+        case "$body" in *dns=*) DNS=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^dns=//p' | head -1);; esac
+        case "$body" in *vpn=*) VPN=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^vpn=//p' | head -1);; esac
+        case "$body" in *ip=*)  IP=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^ip=//p'  | head -1);; esac
+        case "$DNS" in 0|1) ;; *) DNS=1 ;; esac
+        case "$VPN" in 0|1) ;; *) VPN=1 ;; esac
+        case "$IP"  in 0|1) ;; *) IP=1  ;; esac
+        save_conf
+        apply
+        cors
+        printf '{"dns":%s,"vpn":%s,"ip":%s,"applied":1}\n' "$DNS" "$VPN" "$IP"
+        ;;
+    *)
+        load_conf
+        apply
+        cors
+        printf '{"dns":%s,"vpn":%s,"ip":%s,"applied":1}\n' "$DNS" "$VPN" "$IP"
+        ;;
+esac

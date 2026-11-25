@@ -122,3 +122,41 @@
 ||shorturl.io^
 ||s.id^
 ! ||takefile.link^ ← 不拦：部分站下载用，拦了破坏功能
+!----------------境外广告联盟补充（v4，弹窗/插页/跳转）----------------
+||trafficstars.com^
+||trafficforce.com^
+||trafficholder.com^
+||adxpansion.com^
+||adorika.com^
+||plugrush.com^
+||exdynsrv.com^
+||magsrv.com^
+||tsyndicate.com^
+||tsyndicate.net^
+||juicyads.net^
+||juicedata.com^
+
+!----------------弹窗脚本与跳转中转补充----------------
+||popmyads.com^
+||popunderjs.net^
+||clickpush.net^
+||onclickalgo.com^
+||onclicksuper.com^
+||clickanalyt.com^
+||traffic-media.co^
+
+!----------------成人站专用统计（只统计，不碰内容 CDN）----------------
+||exoclick-stats.com^
+||metrics.exoclick.com^
+||stats.trafficjunky.com^
+||track.trafficjunky.com^
+||adtrack.adult^
+
+!----------------短链跳板补充----------------
+||ouo.io^
+||fc.lc^
+||soo.gd^
+||srt.am^
+
+!----------------明确放行：媒体/图片/视频 CDN（防误伤，不在 DNS 层拦）----------------
+! 以下域名族绝不加入拦截：phncdn / ahcdn / xxxcdn / hdzogcdn / javcdn / 各家 tube 的视频与图片 CDN

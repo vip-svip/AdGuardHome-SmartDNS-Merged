@@ -927,6 +927,12 @@ ensure_querylog_off() {
 }
 ensure_querylog_off
 
+# 应用隐私防护规则（防 DNS/VPN/IP 泄露，配置在 /data/adb/agh/privacy.conf）
+_privacy_cgi="$SCRIPT_DIR/webui/cgi-bin/privacy"
+if [ -f "$_privacy_cgi" ]; then
+    [ -f "$AGH_DIR/privacy.conf" ] || printf 'dns=1\nvpn=1\nip=1\n' > "$AGH_DIR/privacy.conf" 2>/dev/null
+    sh "$_privacy_cgi" --apply >/dev/null 2>&1 &
+fi
 # 过滤器缓存为空时自动重新下载（全新安装 / 跨版本升级后必备，否则没有拦截效果）
 agh_rules_guard
 

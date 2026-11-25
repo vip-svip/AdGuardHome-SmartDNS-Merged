@@ -82,3 +82,42 @@
 ||stat.10086.cn^
 ||stat.10010.cn^
 ||stat.189.cn^
+! ---- 移动 补充埋点/广告子域（不碰 www/service/wap 主站）----
+||click.10086.cn^
+||mdata.10086.cn^
+||ums.10086.cn^
+||ad.10086.cn^
+||ads.10086.cn^
+||ada.10086.cn^
+||log.migu.cn^
+||apm.migu.cn^
+||stat.miguvideo.com^
+||ad.miguvideo.com^
+
+! ---- 联通 补充埋点/广告子域 ----
+||mdata.10010.cn^
+||ad.10010.cn^
+||ads.10010.cn^
+||ada.10010.cn^
+||apm.10010.cn^
+||stat.wostore.com^
+
+! ---- 电信 补充埋点/广告子域 ----
+||mdata.189.cn^
+||ad.189.cn^
+||ads.189.cn^
+||ada.189.cn^
+||apm.189.cn^
+||log.21cn.com^
+||stat.21cn.com^
+
+! ---- 广电 补充埋点/广告子域 ----
+||ad.cbn.cn^
+||ads.cbn.cn^
+||apm.cbn.cn^
+
+! ---- 运营商系内容/阅读/视频 埋点（只统计上报，不断正文与播放）----
+||stat.tyread.cn^
+||track.tyread.cn^
+||stat.bestv.com.cn^
+||log.miguvideo.cn^

@@ -160,3 +160,44 @@
 ||stat.wechat.com^
 ||log.douyin.com^
 ||stat.douyin.com^
+! ---- 崩溃监控 / APM（腾讯Bugly、Bugsnag、Rollbar、Datadog、NewRelic）----
+||bugly.qq.com^
+||android.bugly.qq.com^
+||bugsnag.com^
+||rollbar.com^
+||browser-intake-datadoghq.com^
+||bam.nr-data.net^
+
+! ---- Firebase / Google Analytics 遥测 ----
+||firebaseinstallations.googleapis.com^
+||firebaseremoteconfig.googleapis.com^
+||google-analytics.com^
+||analytics.google.com^
+||googletagmanager.com^
+
+! ---- 归因与增长 SDK（国际）----
+||tenjin.com^
+||singular.net^
+||segment.io^
+||segment.com^
+||heap.io^
+||optimizely.com^
+
+! ---- 风控/设备指纹（只拦数据上报子域，不影响验证码与登录）----
+||fengkongcloud.com^
+||tongdun.net^
+||fraudmetrix.cn^
+||dingxiang-inc.com^
+
+! ---- 支付/内容平台埋点 ----
+||log.gw.alipay.com^
+||mdid.alipay.com^
+||log.xiaohongshu.com^
+||apm.xiaohongshu.com^
+||an.meituan.net^
+
+! ---- 云厂商日志服务（App 上报通道）----
+||arms.aliyuncs.com^
+||log.aliyuncs.com^
+||cls.tencentcs.com^
+||sls.aliyuncs.com^
