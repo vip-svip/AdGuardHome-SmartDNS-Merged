@@ -25,7 +25,33 @@ write_prop() {
 
 # 语言检测：语言变更时更新模块说明
 
+# --- root 保活：守护/AGH 缺失即拉起（复用本进程，不新增守护进程） ---
+echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
+# 只在「真正的主守护」存在时才算活着；--v6selftest/--once/--source-only 都是临时进程，不能算
+_daemon_pid() {
+    for _p in /proc/[0-9]*; do
+        _c=$(tr '\0' ' ' < "$_p/cmdline" 2>/dev/null) || continue
+        case "$_c" in
+            *--v6selftest*|*--once*|*--source-only*|*_monitor*) continue ;;
+            *scripts/iptables.sh*) echo "${_p#/proc/}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+_keep_alive() {
+    _d=$(_daemon_pid)
+    if [ -z "$_d" ]; then
+        setsid sh /data/adb/agh/scripts/iptables.sh </dev/null >/dev/null 2>&1 &
+    fi
+    _a=$(pidof AdGuardHome 2>/dev/null | awk '{print $1}')
+    if [ -n "$_a" ]; then
+        echo -1000 > /proc/$_a/oom_score_adj 2>/dev/null
+    fi
+    [ -n "$_d" ] && echo -1000 > /proc/$_d/oom_score_adj 2>/dev/null
+}
 while true; do
+    _keep_alive
     CURRENT_LOCALE=$(getprop persist.sys.locale)
     [ -z "$CURRENT_LOCALE" ] && CURRENT_LOCALE="zh"
     if [ "$LAST_LOCALE" = "INIT" ] || [ "$LAST_LOCALE" != "$CURRENT_LOCALE" ]; then

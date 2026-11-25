@@ -448,6 +448,7 @@ drop_stale_v4() {
 
 # 当前是否应该做 DNS 劫持
 expect_hijack() {
+    vpn_dns_hijack
     case "$vpn_compat" in
         proxy|off) return 0 ;;
     esac
@@ -895,6 +896,26 @@ rebuild_rules_raw() {
 # 两个进程交错执行会出现「REDIRECT 重复 2 条」的中间态。用 mkdir 原子锁串行化。
 # ---------------------------------------------------------------
 IPT_LOCK="$AGH_DIR/.ipt.lock"
+# VPN 隧道内的 DNS 也要进 AGH：tun/wg 侧的 53 一律 REDIRECT 到 AGH 端口，
+# 这样 Clash/V2Ray 这类 tun 客户端替应用解析时，广告域名照样被 AGH 拦掉。
+vpn_dns_hijack() {
+    _vifs=$(vpn_ifaces 2>/dev/null)
+    [ -n "$_vifs" ] || return 0
+    # 端口以 AGH 当前 yaml 为准：AGH 重启会换随机端口，用启动时的旧值会把 DNS 转到死端口
+    _rp=$(awk '/^dns:/{f=1} f&&/^[[:space:]]+port:/{print $2; exit}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null)
+    [ -n "$_rp" ] || _rp="$redir_port"
+    ipt -t nat -N AGH_VPNDNS 2>/dev/null
+    ipt -t nat -F AGH_VPNDNS 2>/dev/null
+    # VPN 应用自身（uid）与其到上游的解析放行，避免回环
+    for _u in $(vpn_uids 2>/dev/null); do
+        [ -n "$_u" ] && ipt -t nat -A AGH_VPNDNS -m owner --uid-owner "$_u" -j RETURN 2>/dev/null
+    done
+    for _i in $_vifs; do
+        ipt -t nat -A AGH_VPNDNS -i "$_i" -p udp --dport 53 -j REDIRECT --to-ports "$_rp"
+        ipt -t nat -A AGH_VPNDNS -i "$_i" -p tcp --dport 53 -j REDIRECT --to-ports "$_rp"
+    done
+    ipt -t nat -C PREROUTING -j AGH_VPNDNS 2>/dev/null || ipt -t nat -I PREROUTING 1 -j AGH_VPNDNS
+}
 rebuild_rules() {
     _n=0
     while ! mkdir "$IPT_LOCK" 2>/dev/null; do
