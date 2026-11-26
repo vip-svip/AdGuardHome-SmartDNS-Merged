@@ -1,0 +1,11 @@
+#!name=开练
+#!desc=开练解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/.png
+#!homepage=https://yfamily.ml
+#!author=89996462
+[Script]
+http-response ^http[s]?:\/\/fitness-notes.nanxiani.cn\/api\/user_info requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/nanxiani.js
+
+
+[MITM]
+hostname = fitness-notes.nanxiani.cn

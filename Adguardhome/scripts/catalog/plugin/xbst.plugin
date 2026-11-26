@@ -1,0 +1,11 @@
+#!name=小包搜题
+#!desc=小包搜题解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+http-response ^http[s]?:\/\/soti.ixyzh.com\/ios\/isvip requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/ixyzh.js
+
+
+[MITM]
+hostname = soti.ixyzh.com

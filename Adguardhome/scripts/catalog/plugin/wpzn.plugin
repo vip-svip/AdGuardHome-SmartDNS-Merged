@@ -1,0 +1,12 @@
+#!name=物品指南
+#!desc=物品指南解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+http-response https://api.revenuecat.com/v1/(receipts|subscribers)/* requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/wpzn.js
+
+
+
+[MITM]
+hostname = api.revenuecat.com

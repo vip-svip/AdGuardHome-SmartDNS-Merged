@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="请求的页面不存在或已移除，请返回 yfamily 首页继续浏览。">
+    <meta name="robots" content="noindex">
+    <title>404 - 页面未找到 - yfamily</title>
+    <link rel="stylesheet" href="/css/n4-theme.css">
+    <link rel="stylesheet" href="/css/n2-404.css">
+</head>
+<body>
+<main class="error-page">
+    <img src="/IMG/nlogo.png" alt="yfamily" class="error-logo">
+    <header class="page-header">
+        <h1>404 Not Found</h1>
+    </header>
+    <a href="/" class="home-link">返回主页</a>
+</main>
+</body>
+</html>

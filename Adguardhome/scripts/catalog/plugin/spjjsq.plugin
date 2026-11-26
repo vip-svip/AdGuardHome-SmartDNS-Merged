@@ -1,0 +1,12 @@
+#!name=视频剪辑神器
+#!desc=视频剪辑神器解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+http-response ^https:\/\/buy\.videoshowiosglobalserver\.com\/zone\/1\.0\.1\/iosPayClient\/payVerify\.htm requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/dgnspbj.js
+
+
+
+[MITM]
+hostname = buy.videoshowiosglobalserver.com

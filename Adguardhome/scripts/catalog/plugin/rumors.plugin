@@ -1,0 +1,6 @@
+#!name=今日辟谣
+#!desc=今日辟谣提醒
+#!homepage=https://yfamilys.com
+
+[Script]
+cron "17 17 17 ? * *" script-path=https://raw.githubusercontent.com/deezertidal/private/main/rumors.js, timeout=10, tag=今日辟谣

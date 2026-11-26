@@ -1,0 +1,10 @@
+﻿#!name=财新会员
+#!desc=财新会员解锁
+#!homepage=https://yfamilys.com
+#!author=cuttlefish
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/caixin.png
+[Script]
+http-response https?:\/\/ipadcms\.caixin\.com\/tmp\/articles script-path=https://github.com/ddgksf2013/MoYu/raw/master/CaiXinZhouKanProCrack.js,requires-body=1,timeout=10, tag=财新会员
+
+[MITM]
+hostname=ipadcms.caixin.com
