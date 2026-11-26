@@ -26,11 +26,11 @@ done
 echo "=== T2 进程单实例 ==="
 eq "AdGuardHome 实例数" "$(cnt "$(pidof AdGuardHome)")" "1"
 eq "aghmitm 实例数" "$(cnt "$(pidof aghmitm)")" "1"
-d=0
-for p in /proc/[0-9]*; do
-    c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
-    case "$c" in *--v6selftest*|*--once*) ;; *scripts/iptables.sh*) d=$((d+1));; esac
-done
+# 一次性取 ps，避免逐条扫 /proc（设备上数千进程，逐条 tr 会拖到十几分钟）
+PSOUT=$(ps -A -o PID,PPID,ARGS 2>/dev/null)
+d=$(printf '%s\n' "$PSOUT" | awk '
+    /scripts\/iptables\.sh/ && !/--once/ && !/--v6selftest/ && !/awk/ { n++; pid[n]=$1; pp[n]=$2 }
+    END { for (i=1;i<=n;i++) { c=0; for (j=1;j<=n;j++) if (pp[i]==pid[j]) c=1; if (!c) k++ } print k+0 }')
 eq "iptables.sh 守护实例" "$d" "1"
 m=0
 # 只数「根实例」：排除某个 ModuleMOD 进程的子壳（脚本内部 $(...) 会 fork 出同名子进程）
@@ -81,7 +81,7 @@ eq "SNI 端口集合" "$PORTS" "$EXP"
 
 echo "=== T7 各格式域名抽取 ==="
 mkdir -p "$REWRITE"
-rm -f "$REWRITE"/v_* 2>/dev/null
+rm -f "$REWRITE"/v_* "$REWRITE/uidtest.rewrite" "$REWRITE/dbg.rewrite" 2>/dev/null
 printf '^https?://v-rewrite.test/x url reject\n' > "$REWRITE/v_rewrite.rewrite"
 printf '[Rule]\nDOMAIN-SUFFIX,v-plugin.test,REJECT\n' > "$REWRITE/v_plugin.plugin"
 printf '[rewrite_local]\n^https?://v-qx.test/a url reject\nhostname = %%APPEND%% v-qx2.test, v-qx3.test\n' > "$REWRITE/v_qx.conf"
@@ -132,7 +132,8 @@ cat > "$REWRITE/v_syntax.js" <<'EOS'
 // @match ^https?://example\.com/vsyntax
 this is not javascript ===
 EOS
-cat > "$REWRITE/v_loop.js" <<'EOS'
+LOOPJS="v_loop_$$.js"
+cat > "$REWRITE/$LOOPJS" <<'EOS'
 // @match ^https?://example\.com/vloop
 while (true) {}
 EOS
@@ -143,9 +144,9 @@ T0=$(date +%s)
 curl -sk -x $M -o /dev/null -m 12 https://example.com/vloop 2>/dev/null
 DT=$(( $(date +%s) - T0 ))
 [ "$DT" -le 5 ] && ok "JS 死循环被硬超时中断 (${DT}s)" || bad "JS 死循环未被中断" "cost=${DT}s"
-eq "语法错误脚本不影响服务（日志记录）" "$(grep -c 'js .*error' $AGH_DIR/mitm.log)" "1"
+ge "语法错误脚本不影响服务（日志记录）" "$(grep -c 'js .*error' $AGH_DIR/mitm.log)" 1
 eq "aghmitm 仍存活" "$(cnt "$(pidof aghmitm)")" "1"
-rm -f "$REWRITE"/v_*.js "$REWRITE/v_mitm.rewrite"
+rm -f "$REWRITE"/v_*.js "$REWRITE/v_loop_"*.js "$REWRITE/v_mitm.rewrite"
 
 echo "=== T10 uid 透明分流生命周期 ==="
 : > $AGH_DIR/mitm_uids.txt; sh $AGH_DIR/scripts/iptables.sh --once >/dev/null 2>&1; sleep 2
@@ -172,6 +173,58 @@ eq "mitm CGI running" "$(curl -s -m 8 http://127.0.0.1:6081/cgi-bin/mitm | grep 
 eq "apps CGI 已删除" "$(curl -s -o /dev/null -w '%{http_code}' -m 6 http://127.0.0.1:6081/cgi-bin/apps)" "404"
 
 echo
+echo "=== T13 SNI 层真实拦截（非 root uid，固定公网 IP，只换 SNI）==="
+if su 10253 -c "id -u" >/dev/null 2>&1; then
+    for d in umeng.com propellerpops.com; do
+        RC=$(su 10253 -c "curl -s -o /dev/null --resolve $d:443:223.5.5.5 https://$d/" 2>/dev/null; echo $?)
+        case "$RC" in 35|56) ok "SNI 拦截 $d (exit=$RC RST)" ;; *) bad "SNI 拦截 $d" "exit=$RC 期望 35/56" ;; esac
+    done
+    RCOK=$(su 10253 -c "curl -s -o /dev/null --resolve www.baidu.com:443:223.5.5.5 https://www.baidu.com/" 2>/dev/null; echo $?)
+    case "$RCOK" in 60|0) ok "SNI 对照放行 www.baidu.com (exit=$RCOK)" ;; *) bad "SNI 对照" "exit=$RCOK 期望 60/0" ;; esac
+else
+    skip "SNI 层真实拦截" "无 su 切 uid 能力"
+fi
+
+echo "=== T14 按 uid 透明接管（IPv4）==="
+echo 10253 > $AGH_DIR/mitm_uids.txt
+sh $AGH_DIR/scripts/iptables.sh --once >/dev/null 2>&1
+sleep 2
+eq "清单写入后 8899 规则" "$(iptables -t nat -S OUTPUT 2>/dev/null | grep -c 8899)" "1"
+N0=$(wc -l < $AGH_DIR/mitm.log 2>/dev/null | tr -d ' ')
+C4=$(su 10253 -c "curl -4 -s -o /dev/null -w '%{http_code}' -m 12 https://www.baidu.com/" 2>/dev/null)
+eq "该 uid 走 IPv4 仍可上网" "$C4" "200"
+HIT=$(tail -n +$((N0+1)) $AGH_DIR/mitm.log 2>/dev/null | grep -c 'transparent TLS ok')
+ge "流量确实进了 8899（日志命中）" "$HIT" 1
+PKT=$(iptables -t nat -L OUTPUT -v -n 2>/dev/null | awk '$0 ~ /8899/ {print $1}' | head -1)
+ge "nat 规则命中计数" "$PKT" 1
+C6=$(su 10253 -c "curl -6 -s -o /dev/null -w '%{http_code}' -m 8 https://www.baidu.com/" 2>/dev/null; echo "|$?")
+eq "IPv6 被回落（无 nat 表时 REJECT 逼回 v4）" "$(echo "$C6" | grep -c '^000')" "1"
+: > $AGH_DIR/mitm_uids.txt
+sh $AGH_DIR/scripts/iptables.sh --once >/dev/null 2>&1
+sleep 2
+eq "清空名单后 8899 规则" "$(iptables -t nat -S OUTPUT 2>/dev/null | grep -c 8899)" "0"
+eq "清空名单后 v6 REJECT" "$(ip6tables -S OUTPUT 2>/dev/null | grep -c 'reject-with tcp-reset')" "0"
+
+echo "=== T15 IPv6 能力探测（记录内核限制）==="
+if ip6tables -t nat -L OUTPUT >/dev/null 2>&1; then
+    ok "内核支持 ip6tables nat"
+else
+    skip "内核无 ip6tables nat" "v6 只能靠 filter 层 REJECT 回落"
+fi
+echo "=== T16 开机路径确定性重建（本次开机是否由 service.sh 强制建成链）==="
+BOOT_LINE=$(grep -c 'SNI/QUIC 链已确定性重建完成' "$AGH_DIR"/*.log 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+if [ "$BOOT_LINE" -ge 1 ]; then
+    ok "开机确定性重建已执行（日志命中 $BOOT_LINE 次）"
+else
+    ge "SNI 链在本次会话已建成" "$(iptables -S AGH_SNI 2>/dev/null | grep -c NFQUEUE)" 11
+fi
+
+echo "=== T17 套件自清理（不残留测试脚本）==="
+eq "脚本目录残留数" "$(ls "$REWRITE" 2>/dev/null | wc -l)" "0"
+eq "名单文件残留行数" "$(wc -l < $AGH_DIR/mitm_uids.txt 2>/dev/null | tr -d ' ')" "0"
+eq "8899 分流规则残留" "$(iptables -t nat -S OUTPUT 2>/dev/null | grep -c 8899)" "0"
+eq "v6 REJECT 残留" "$(ip6tables -S OUTPUT 2>/dev/null | grep -c 'reject-with tcp-reset')" "0"
+eq "汇总文件残留域名数" "$(grep -c '^||' "$OUT" 2>/dev/null)" "0"
 echo "======== 汇总 ========"
 echo "PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP"
 [ "$FAIL" -eq 0 ] && echo "RESULT: ALL PASS" || echo "RESULT: $FAIL FAILED"

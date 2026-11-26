@@ -261,7 +261,8 @@ smartdns_running() { pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1
 if ! agh_running; then
     R1=$((30000+RANDOM%35536)); R2=40251
     sed -i "/^dns:/,/^[^[:space:]]/ s/^\([[:space:]]*port:\) [0-9]*/\1 $R1/; s/^\([[:space:]]*address:\) [0-9.]*:[0-9]*/\1 0.0.0.0:$R2/" "$BIN_DIR/AdGuardHome.yaml"
-    sed -i "s/^redir_port=.*/redir_port=$R1/" "$SCRIPT_DIR/config.prop"
+    chattr -i "$SCRIPT_DIR/config.prop" 2>/dev/null
+sed -i "s/^redir_port=.*/redir_port=$R1/" "$SCRIPT_DIR/config.prop"
 fi
 
 # ---------------------------------------------------------------
@@ -987,5 +988,28 @@ done
 
 # 日志超限时清空
 [ -f "$MAIN_LOG" ] && [ "$(wc -c < "$MAIN_LOG")" -ge 102400 ] && : > "$MAIN_LOG"
+
+# ---- 开机确定性重建：SNI/QUIC 链 ----
+# 实测：开机早期 AGH 尚未就绪时，守护的首次 sni_sync 不会建成链，链会空上几分钟，
+# 期间 SNI/QUIC 层完全没有拦截。这里等 AGH 起来后强制重建一次，直到 11 条 NFQUEUE 就位，
+# 最长等 40 秒；之后仍有守护每 5 秒的自愈兜底。
+_boot_built=0
+_boot_t0=$(date +%s)
+while [ $(( $(date +%s) - _boot_t0 )) -lt 40 ]; do
+    if pidof AdGuardHome >/dev/null 2>&1 && \
+       [ "$(iptables -S AGH_SNI 2>/dev/null | grep -c NFQUEUE)" -ge 11 ]; then
+        _boot_built=1
+        break
+    fi
+    if [ -f "$SCRIPT_DIR/iptables.sh" ]; then
+        sh "$SCRIPT_DIR/iptables.sh" --once >/dev/null 2>&1
+    fi
+    sleep 3
+done
+if [ "$_boot_built" = "1" ]; then
+    log "[BOOT] SNI/QUIC 链已确定性重建完成（11 条 NFQUEUE）。"
+else
+    log "[WARN] [BOOT] 40 秒内未建成 SNI 链，交由守护自愈。"
+fi
 
 exit 0

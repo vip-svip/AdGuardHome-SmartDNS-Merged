@@ -972,11 +972,16 @@ mitm_redirect_apply() {
     ip6tables $IPT_W -t nat -L OUTPUT -n --line-numbers 2>/dev/null \
         | awk '$0 ~ /8899/ && $1 ~ /^[0-9]+$/ {print $1}' | sort -rn \
         | while read -r _n; do ip6tables $IPT_W -t nat -D OUTPUT "$_n" 2>/dev/null; done
+    # 本机内核无 ip6tables nat：名单内 uid 的 v6 443 直接 REJECT，逼其回落 IPv4 再被接管
+    ip6tables $IPT_W -t filter -S OUTPUT 2>/dev/null | grep -- "--reject-with tcp-reset" | while read -r line; do
+        rule=${line#-A OUTPUT }
+        ip6tables $IPT_W -t filter -D OUTPUT $rule 2>/dev/null
+    done
     # 再按名单重建
     for _u in $(mitm_uids); do
         case "$_u" in ""|*[!0-9]*) continue ;; esac
         iptables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
-        ip6tables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
+        ip6tables $IPT_W -t filter -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REJECT --reject-with tcp-reset 2>/dev/null
     done
 }
 vpn_dns_hijack() {
