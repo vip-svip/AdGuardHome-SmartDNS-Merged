@@ -94,7 +94,19 @@ case "$QUERY_STRING" in
         cors; printf '{"ok":true,"name":"%s","enabled":%s}\n' "$n" "$st"
         exit 0
         ;;
-    apply=*)
+    del=*)
+        n=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*del=\([^&]*\).*/\1/p' | sed 's/%20/ /g')
+        case "$n" in
+            ""|*/*|*..*|.*) cors; printf '{"ok":false,"error":"bad name"}\n'; exit 0 ;;
+        esac
+        if [ -f "$DIR/$n" ]; then
+            rm -f "$DIR/$n" "$DIR/.$n.off" 2>/dev/null
+            cors; printf '{"ok":true,"deleted":"%s"}\n' "$n"
+        else
+            cors; printf '{"ok":false,"error":"not found"}\n'
+        fi
+        exit 0
+        ;;    apply=*)
         tmp=$(mktemp 2>/dev/null || echo /data/adb/agh/.rwtmp)
         : > "$tmp"
         for f in "$DIR"/*; do
