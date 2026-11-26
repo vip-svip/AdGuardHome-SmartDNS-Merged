@@ -33,10 +33,9 @@ for p in /proc/[0-9]*; do
 done
 eq "iptables.sh 守护实例" "$d" "1"
 m=0
-for p in /proc/[0-9]*; do
-    c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
-    case "$c" in *ModuleMOD*) m=$((m+1));; esac
-done
+# 只数「根实例」：排除某个 ModuleMOD 进程的子壳（脚本内部 $(...) 会 fork 出同名子进程）
+PSOUT=$(ps -A -o PID,PPID,ARGS 2>/dev/null)
+m=$(printf '%s\n' "$PSOUT" | awk '/ModuleMOD\.sh/ { n++; pid[n]=$1; pp[n]=$2 } END { for (i=1;i<=n;i++) { c=0; for (j=1;j<=n;j++) if (pp[i]==pid[j]) c=1; if (!c) k++ } print k+0 }')
 eq "ModuleMOD 实例" "$m" "1"
 
 echo "=== T3 面板与页面 ==="
@@ -107,18 +106,21 @@ M=http://127.0.0.1:8899
 TMPWWW=/data/local/tmp/_vwww
 mkdir -p $TMPWWW
 printf 'hello world' > $TMPWWW/index.html
-busybox httpd -p 127.0.0.1:8088 -h $TMPWWW >/dev/null 2>&1 &
+pkill -f "httpd.*8088" 2>/dev/null; sleep 1
+setsid busybox httpd -p 127.0.0.1:8088 -h $TMPWWW </dev/null >/dev/null 2>&1 &
 HPID=$!
-sleep 2
-printf '^https?://example\\.com/vb url reject\n^https?://example\\.com/v302 url 302 https://www.baidu.com/\n^http://127\\.0\\.0\\.1:8088/index\\.html url-body-replace hello HELLO\n' > "$REWRITE/v_mitm.rewrite"
+sleep 3
+BASE=$(curl -s -m 5 http://127.0.0.1:8088/index.html 2>/dev/null)
+eq "httpd 基线" "$BASE" "hello world"
+printf '^https?://example\\.com/vb url reject\n^https?://example\\.com/v302 url 302 https://www.baidu.com/\n^http://127\\.0\\.0\\.1:8088/ url-body-replace hello HELLO\n' > "$REWRITE/v_mitm.rewrite"
 sleep 7
 eq "reject -> 403" "$(curl -sk -x $M -o /dev/null -w '%{http_code}' -m 12 https://example.com/vb)" "403"
 eq "302 -> 302" "$(curl -sk -x $M -o /dev/null -w '%{http_code}' -m 12 https://example.com/v302)" "302"
 eq "302 Location" "$(curl -sk -x $M -o /dev/null -w '%{redirect_url}' -m 12 https://example.com/v302)" "https://www.baidu.com/"
-eq "body 改写" "$(curl -sk -x $M -m 12 http://127.0.0.1:8088/ 2>/dev/null | head -c 20)" "HELLO world"
+eq "body 改写" "$(i=0; B=; while [ $i -lt 3 ]; do B=$(curl -sk -x $M -m 10 http://127.0.0.1:8088/ 2>/dev/null | head -c 20); [ "$B" = "HELLO world" ] && break; i=$((i+1)); sleep 3; done; echo "$B")" "HELLO world"
 eq "透明模式 reject -> 403" "$(curl -sk --connect-to example.com:443:127.0.0.1:8899 -o /dev/null -w '%{http_code}' -m 12 https://example.com/vb)" "403"
 eq "非命中直接转发 -> 200" "$(curl -sk -x $M -o /dev/null -w '%{http_code}' -m 15 https://www.baidu.com/)" "200"
-kill $HPID 2>/dev/null
+pkill -f "httpd.*8088" 2>/dev/null; kill $HPID 2>/dev/null
 rm -rf $TMPWWW
 
 echo "=== T9 JS 脚本 ==="

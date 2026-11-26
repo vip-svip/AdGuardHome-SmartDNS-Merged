@@ -143,8 +143,8 @@ func TestJSTimeoutQuarantine(t *testing.T) {
 	if cost > 4*time.Second {
 		t.Fatalf("超时未生效，耗时 %v", cost)
 	}
-	if out.handled {
-		t.Fatal("超时脚本不应产生响应")
+	if !out.handled || out.status != 504 {
+		t.Fatalf("超时后应返回 504 短路（handled=%v status=%d），否则客户端会被挂住", out.handled, out.status)
 	}
 
 	// 第二次：已被隔离，应立即返回

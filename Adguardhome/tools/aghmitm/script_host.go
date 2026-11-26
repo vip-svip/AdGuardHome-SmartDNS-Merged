@@ -171,8 +171,8 @@ func execOne(s jsScript, url, method string, reqHdr map[string]string, reqBody s
 		logf("js %s timeout after 2s (discarded, quarantined 5m)", filepath.Base(s.path))
 		qMu.Lock(); quarantine[s.path] = time.Now().Add(5 * time.Minute); qMu.Unlock()
 		vm.Interrupt("timeout")
-		out.handled = false
-		out.status, out.body, out.url = 0, "", ""
+		out.handled = true
+		out.status, out.body, out.url = 504, "", ""
 		return
 	}
 	if !done {

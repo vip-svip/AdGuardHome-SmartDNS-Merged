@@ -841,6 +841,17 @@ sni_sync() {
     sni_sync_apply
 }
 
+# 启动即清扫同名的其它主守护（只匹配无参数的 iptables.sh，避开 --once/--v6selftest）
+_sweep_daemon() {
+    for _p in /proc/[0-9]*; do
+        _pid=${_p#/proc/}
+        [ "$_pid" = "$$" ] && continue
+        _c=$(tr '\0' ' ' < "$_p/cmdline" 2>/dev/null) || continue
+        case "$_c" in *--once*|*--v6selftest*|*--source-only*|*--v6\ *) continue ;; esac
+        echo "$_c" | grep -qE '/scripts/iptables\.sh[[:space:]]*$' || continue
+        kill -9 "$_pid" 2>/dev/null
+    done
+}
 rebuild_rules_raw() {
     # ---- 第零步：面板防护（幂等，每次 rebuild 先校准一遍）----
     # AGH 40251 / smartdns 6080 / busybox httpd 6081 都绑 0.0.0.0/[::]，
@@ -1052,6 +1063,7 @@ if [ $ONCE -eq 1 ] || [ $V6ONLY -eq 1 ]; then
     exit 0
 fi
 
+_sweep_daemon
 while true; do
     date +%s > "$AGH_DIR/.daemon_hb" 2>/dev/null
     echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
