@@ -55,8 +55,9 @@ fmt_of() {
 domains_of() {
     _f="$DIR/$1"
     # 1) URL 重写类：^https?://host/... url reject|reject-200|...
-    grep -iE 'url[ -]reject|reject-(200|img|dict|array)|url reject' "$_f" 2>/dev/null \
-        | sed -n 's#.*https\?://\([^/^ ]*\).*#\1#p'
+    # 抽 URL 重写行里的主机名：不用 sed 的 \?（busybox sed 不支持），改 awk 按 :// 切
+    grep -iE 'url[ -]reject|reject-(200|img|dict|array)' "$_f" 2>/dev/null \
+        | awk '{ for (i = 1; i <= NF; i++) { t = $i; if (t ~ /http/) { sub(/^.*:\/\//, "", t); sub(/[\/^].*/, "", t); if (t ~ /\./) print t } } }'
     # 2) Clash / Surge / 小火箭 / QX 规则行：TYPE,host,REJECT|REJECT-TINYGIF|0.0.0.0
     grep -iE ',\s*(REJECT|REJECT-TINYGIF|REJECT-DROP|REJECT-NO-DROP)\s*$' "$_f" 2>/dev/null \
         | awk -F, '{h=$2; gsub(/ /,"",h); print h}'
