@@ -1,0 +1,25 @@
+! 内置默认脚本：基础拦截（可停用、可编辑、可删除）
+! 作用：模块首次开机自动释放，保证「脚本」页不是空的，给一个可直接用的起点。
+! 语法：小火箭 / Surge / Loon 通用重写写法，reject 类规则会被汇总进「脚本拦截」DNS 过滤器。
+!
+! ── 广告与统计 SDK ─────────────────────────────
+^https?://.*\.umeng\.com/ url reject
+^https?://.*\.umengcloud\.com/ url reject
+^https?://.*\.growingio\.com/ url reject
+^https?://.*\.sensorsdata\.cn/ url reject
+^https?://app-measurement\.com/ url reject
+^https?://.*\.appsflyer\.com/ url reject
+^https?://.*\.adjust\.com/ url reject
+!
+! ── 国内常见广告域 ─────────────────────────────
+^https?://.*\.gdt\.qq\.com/ url reject
+^https?://.*\.pos\.baidu\.com/ url reject
+^https?://.*\.cpro\.baidu\.com/ url reject
+^https?://.*\.tanx\.com/ url reject
+^https?://.*\.alimama\.com/ url reject
+!
+! ── 追踪与行为采集 ─────────────────────────────
+^https?://.*\.doubleclick\.net/ url reject
+^https?://.*\.google-analytics\.com/ url reject
+^https?://.*\.googletagmanager\.com/ url reject
+^https?://.*\.branch\.io/ url reject

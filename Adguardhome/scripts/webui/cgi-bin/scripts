@@ -25,7 +25,47 @@ cors() {
     printf 'Content-Type: application/json; charset=utf-8\r\n'
     printf '\r\n'
 }
-case "$REQUEST_METHOD" in OPTIONS) cors; exit 0 ;; esac
+# POST /cgi-bin/scripts  —— 导入脚本
+#   name=<文件名>&content=<脚本内容>      直接写入
+#   name=<文件名>&url=<远程地址>          由设备端 curl 拉取后再写入
+import_script() {
+    _len=${CONTENT_LENGTH:-0}
+    [ "$_len" -gt 0 ] 2>/dev/null || { cors; printf '{"ok":false,"error":"empty body"}\n'; return; }
+    _body=$(dd bs=1 count="$_len" 2>/dev/null)
+    _name=$(printf '%s' "$_body" | tr '&' '\n' | sed -n 's/^name=//p' | head -1)
+    _content=$(printf '%s' "$_body" | tr '&' '\n' | sed -n 's/^content=//p' | head -1)
+    _url=$(printf '%s' "$_body" | tr '&' '\n' | sed -n 's/^url=//p' | head -1)
+    _name=$(printf '%b' "$(printf '%s' "$_name" | sed 's/+/ /g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')")
+    case "$_name" in
+        ""|*/*|*..*|.*) cors; printf '{"ok":false,"error":"bad name"}\n'; return ;;
+    esac
+    case "$_name" in
+        *.rewrite|*.plugin|*.lpx|*.sgmodule|*.conf|*.js|*.yaml|*.yml|*.json|*.list|*.txt|*.hosts) ;;
+        *) _name="$_name.rewrite" ;;
+    esac
+    mkdir -p "$DIR" 2>/dev/null
+    if [ -n "$_url" ]; then
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL --max-time 20 "$_url" -o "$DIR/$_name" 2>/dev/null || {
+                cors; printf '{"ok":false,"error":"download failed"}\n'; return; }
+        else
+            cors; printf '{"ok":false,"error":"curl not available"}\n'; return
+        fi
+    else
+        _content=$(printf '%b' "$(printf '%s' "$_content" | sed 's/+/ /g; s/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g')")
+        printf '%s\n' "$_content" > "$DIR/$_name"
+    fi
+    chmod 644 "$DIR/$_name" 2>/dev/null
+    rm -f "$DIR/.$_name.off" 2>/dev/null
+    _n=$(wc -c < "$DIR/$_name" 2>/dev/null | tr -d ' ')
+    curl -s -m 20 "http://127.0.0.1:6081/cgi-bin/scripts?apply=1" >/dev/null 2>&1
+    cors
+    printf '{"ok":true,"name":"%s","size":%s}\n' "$_name" "${_n:-0}"
+}
+case "$REQUEST_METHOD" in
+    OPTIONS) cors; exit 0 ;;
+    POST) import_script; exit 0 ;;
+esac
 mkdir -p "$DIR" 2>/dev/null
 
 enabled() { [ -f "$DIR/.$1.off" ] && echo 0 || echo 1; }
@@ -57,7 +97,8 @@ domains_of() {
     # 1) URL 重写类：^https?://host/... url reject|reject-200|...
     # 抽 URL 重写行里的主机名：不用 sed 的 \?（busybox sed 不支持），改 awk 按 :// 切
     grep -iE 'url[ -]reject|reject-(200|img|dict|array)' "$_f" 2>/dev/null \
-        | awk '{ for (i = 1; i <= NF; i++) { t = $i; if (t ~ /http/) { sub(/^.*:\/\//, "", t); sub(/[\/^].*/, "", t); if (t ~ /\./) print t } } }'
+        | grep -oE 'http[a-z?]*://[^/ ]+' \
+        | sed -e 's#^http[a-z?]*://##' -e 's/^\.\*\.//' -e 's/^\*\.//' -e 's/\\\././g' -e 's/^\.//'
     # 2) Clash / Surge / 小火箭 / QX 规则行：TYPE,host,REJECT|REJECT-TINYGIF|0.0.0.0
     grep -iE ',\s*(REJECT|REJECT-TINYGIF|REJECT-DROP|REJECT-NO-DROP)\s*$' "$_f" 2>/dev/null \
         | awk -F, '{h=$2; gsub(/ /,"",h); print h}'

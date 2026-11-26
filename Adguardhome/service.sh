@@ -931,6 +931,16 @@ ensure_querylog_off
 
 # 应用隐私防护规则（防 DNS/VPN/IP 泄露，配置在 /data/adb/agh/privacy.conf）
 # 系统级 CA 幂等安装（HTTP S / MITM），保证 overlay 每次开机都在位
+# ---- 内置默认脚本：缺失即释放 ----
+# 目的：脚本页首次打开就有可用条目，而不是空表；用户可停用/删除，不会反复覆盖。
+_REWRITE_DIR="$AGH_DIR/scripts/rewrite"
+mkdir -p "$_REWRITE_DIR" 2>/dev/null
+if [ ! -f "$_REWRITE_DIR/default.rewrite" ]; then
+    for _src in "$AGH_DIR/scripts/rewrite/default.rewrite" "$MODDIR/scripts/rewrite/default.rewrite" \
+                "/data/adb/modules/AdGuardHome/scripts/rewrite/default.rewrite"; do
+        [ -f "$_src" ] && { cp -f "$_src" "$_REWRITE_DIR/default.rewrite" 2>/dev/null; break; }
+    done
+fi
 _certs_sh="$SCRIPT_DIR/certs_install.sh"
 [ -f "$_certs_sh" ] && sh "$_certs_sh" >/dev/null 2>&1 &
 # 改写脚本运行时：aghmitm（用模块内置 MITM CA 做 TLS 解密 + URL 重写）

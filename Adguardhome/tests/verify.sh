@@ -99,7 +99,7 @@ for d in v-rewrite v-plugin v-qx v-qx2 v-qx3 v-surge v-clash v-sb v-hosts v-dnsm
 done
 rm -f "$REWRITE"/v_* 2>/dev/null
 curl -s -m 25 "http://127.0.0.1:6081/cgi-bin/scripts?apply=1" >/dev/null 2>&1
-eq "清理夹具后汇总数" "$(grep -c '^||' "$OUT" 2>/dev/null)" "0"
+eq "清理夹具后无测试域名（内置脚本可保留）" "$(grep -cE "\|\|(v-|t-)" "$OUT" 2>/dev/null)" "0"
 
 echo "=== T8 MITM：reject / 302 / body 改写 / 透明 ==="
 M=http://127.0.0.1:8899
@@ -173,18 +173,25 @@ eq "mitm CGI running" "$(curl -s -m 8 http://127.0.0.1:6081/cgi-bin/mitm | grep 
 eq "apps CGI 已删除" "$(curl -s -o /dev/null -w '%{http_code}' -m 6 http://127.0.0.1:6081/cgi-bin/apps)" "404"
 
 echo
-echo "=== T13 SNI 层真实拦截（非 root uid，固定公网 IP，只换 SNI）==="
+echo "=== T13 SNI 层真实拦截（双路径：MITM 接管 502 / SNI RST exit35）==="
 if su 10253 -c "id -u" >/dev/null 2>&1; then
-    for d in umeng.com propellerpops.com; do
-        RC=$(su 10253 -c "curl -s -o /dev/null --resolve $d:443:223.5.5.5 https://$d/" 2>/dev/null; echo $?)
-        case "$RC" in 35|56) ok "SNI 拦截 $d (exit=$RC RST)" ;; *) bad "SNI 拦截 $d" "exit=$RC 期望 35/56" ;; esac
-    done
-    RCOK=$(su 10253 -c "curl -s -o /dev/null --resolve www.baidu.com:443:223.5.5.5 https://www.baidu.com/" 2>/dev/null; echo $?)
-    case "$RCOK" in 60|0) ok "SNI 对照放行 www.baidu.com (exit=$RCOK)" ;; *) bad "SNI 对照" "exit=$RCOK 期望 60/0" ;; esac
+    echo 10253 > $AGH_DIR/mitm_uids.txt
+    sh $AGH_DIR/scripts/iptables.sh --once >/dev/null 2>&1
+    sleep 2
+    CB=$(su 10253 -c "curl -s -o /dev/null -w '%{http_code}' -m 10 --resolve umeng.com:443:223.5.5.5 https://umeng.com/" 2>/dev/null)
+    eq "被拦域（经 MITM）-> 502" "$CB" "502"
+    CO=$(su 10253 -c "curl -s -o /dev/null -w '%{http_code}' -m 12 --resolve www.baidu.com:443:223.5.5.5 https://www.baidu.com/" 2>/dev/null)
+    eq "正常域（经 MITM）-> 200" "$CO" "200"
+    : > $AGH_DIR/mitm_uids.txt
+    sh $AGH_DIR/scripts/iptables.sh --once >/dev/null 2>&1
+    sleep 2
+    RB=$(timeout 10 su 10253 -c "curl -s -o /dev/null --resolve umeng.com:443:223.5.5.5 https://umeng.com/" 2>/dev/null; echo $?)
+    case "$RB" in 35|56) ok "被拦域（SNI RST）exit=$RB" ;; *) bad "被拦域 SNI RST" "exit=$RB 期望 35/56" ;; esac
+    RO=$(timeout 10 su 10253 -c "curl -s -o /dev/null --resolve www.baidu.com:443:223.5.5.5 https://www.baidu.com/" 2>/dev/null; echo $?)
+    case "$RO" in 60|0) ok "正常域对照 exit=$RO" ;; *) bad "正常域对照" "exit=$RO 期望 60/0" ;; esac
 else
-    skip "SNI 层真实拦截" "无 su 切 uid 能力"
+    skp "SNI 层真实拦截" "无 su 切 uid 能力"
 fi
-
 echo "=== T14 按 uid 透明接管（IPv4）==="
 echo 10253 > $AGH_DIR/mitm_uids.txt
 sh $AGH_DIR/scripts/iptables.sh --once >/dev/null 2>&1
@@ -220,11 +227,11 @@ else
 fi
 
 echo "=== T17 套件自清理（不残留测试脚本）==="
-eq "脚本目录残留数" "$(ls "$REWRITE" 2>/dev/null | wc -l)" "0"
+eq "脚本目录残留数（允许内置 default.rewrite）" "$(ls "$REWRITE" 2>/dev/null | grep -v "^default\.rewrite$" | grep -c .)" "0"
 eq "名单文件残留行数" "$(wc -l < $AGH_DIR/mitm_uids.txt 2>/dev/null | tr -d ' ')" "0"
 eq "8899 分流规则残留" "$(iptables -t nat -S OUTPUT 2>/dev/null | grep -c 8899)" "0"
 eq "v6 REJECT 残留" "$(ip6tables -S OUTPUT 2>/dev/null | grep -c 'reject-with tcp-reset')" "0"
-eq "汇总文件残留域名数" "$(grep -c '^||' "$OUT" 2>/dev/null)" "0"
+eq "汇总文件无测试残留域名" "$(grep -cE "\|\|(v-|t-)" "$OUT" 2>/dev/null)" "0"
 echo "======== 汇总 ========"
 echo "PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP"
 [ "$FAIL" -eq 0 ] && echo "RESULT: ALL PASS" || echo "RESULT: $FAIL FAILED"
