@@ -965,25 +965,32 @@ mitm_uids() {
     grep -oE '^[0-9]+' "$_f" 2>/dev/null | sort -u | tr '\n' ' '
 }
 mitm_redirect_apply() {
-    # 先按行号整批删掉 OUTPUT 上指向 8899 的重定向（避免名单清空后残留）
+    # 幂等增删：只删「名单里已不存在」的规则，只补「缺失」的规则。
+    # 早期实现是每次重建都先全删再加，导致守护每 5 秒抖动一次 iptables，
+    # 计数器被清零（实测 nat 计数一直读到 0），也白白增加内核开销。
+    _want=" $(mitm_uids) "
     iptables $IPT_W -t nat -L OUTPUT -n --line-numbers 2>/dev/null \
-        | awk '$0 ~ /8899/ && $1 ~ /^[0-9]+$/ {print $1}' | sort -rn \
-        | while read -r _n; do iptables $IPT_W -t nat -D OUTPUT "$_n" 2>/dev/null; done
-    ip6tables $IPT_W -t nat -L OUTPUT -n --line-numbers 2>/dev/null \
-        | awk '$0 ~ /8899/ && $1 ~ /^[0-9]+$/ {print $1}' | sort -rn \
-        | while read -r _n; do ip6tables $IPT_W -t nat -D OUTPUT "$_n" 2>/dev/null; done
-    # 本机内核无 ip6tables nat：名单内 uid 的 v6 443 直接 REJECT，逼其回落 IPv4 再被接管
-    ip6tables $IPT_W -t filter -S OUTPUT 2>/dev/null | grep -- "--reject-with tcp-reset" | while read -r line; do
-        rule=${line#-A OUTPUT }
-        ip6tables $IPT_W -t filter -D OUTPUT $rule 2>/dev/null
+        | awk '$0 ~ /8899/ {print $1" "$0}' | while read -r _n _rest; do
+        _u=$(echo "$_rest" | sed -n 's/.*uid-owner \([0-9][0-9]*\).*/\1/p'; echo "$_rest" | sed -n 's/.*UID match \([0-9][0-9]*\).*/\1/p' | head -1)
+        [ -n "$_u" ] || continue
+        case "$_want" in *" $_u "*) ;; *) iptables $IPT_W -t nat -D OUTPUT "$_n" 2>/dev/null ;; esac
     done
-    # 再按名单重建
+    ip6tables $IPT_W -t filter -L OUTPUT -n --line-numbers 2>/dev/null \
+        | awk '$0 ~ /reject-with tcp-reset/ {print $1" "$0}' | while read -r _n _rest; do
+        _u=$(echo "$_rest" | sed -n 's/.*uid-owner \([0-9][0-9]*\).*/\1/p'; echo "$_rest" | sed -n 's/.*UID match \([0-9][0-9]*\).*/\1/p' | head -1)
+        [ -n "$_u" ] || continue
+        case "$_want" in *" $_u "*) ;; *) ip6tables $IPT_W -t filter -D OUTPUT "$_n" 2>/dev/null ;; esac
+    done
     for _u in $(mitm_uids); do
         case "$_u" in ""|*[!0-9]*) continue ;; esac
-        iptables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
-        ip6tables $IPT_W -t filter -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REJECT --reject-with tcp-reset 2>/dev/null
+        iptables $IPT_W -t nat -C OUTPUT -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null || \
+            iptables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
+        # 本机无 ip6tables nat：同 uid 的 v6 443 直接 RST，逼其回落 IPv4 再被接管
+        ip6tables $IPT_W -t filter -C OUTPUT -m owner --uid-owner "$_u" -p tcp --dport 443 -j REJECT --reject-with tcp-reset 2>/dev/null || \
+            ip6tables $IPT_W -t filter -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REJECT --reject-with tcp-reset 2>/dev/null
     done
 }
+
 vpn_dns_hijack() {
     _vifs=$(vpn_ifaces 2>/dev/null)
     [ -n "$_vifs" ] || return 0
