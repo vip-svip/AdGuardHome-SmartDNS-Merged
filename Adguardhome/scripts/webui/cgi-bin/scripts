@@ -142,7 +142,7 @@ case "$Q" in
         _idx="$CAT/index.json"
         if [ -f "$_idx" ]; then
             printf '{"ok":true,"index":"%s","scripts":' "$_idx"
-            cat "$_idx"
+            sed '1s/^.*\[/[/' < "$_idx"
             printf '}\n'
         else
             printf '{"ok":false,"error":"index.json 缺失","scripts":[]}\n'
