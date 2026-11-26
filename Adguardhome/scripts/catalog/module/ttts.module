@@ -1,0 +1,12 @@
+#!name=天天跳绳
+#!desc=天天跳绳解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+TTTS=type=http-response,pattern=^https:\/\/api\.tiantiantiaosheng\.com\/api2\/s_plus_member\/info,requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/TTTS.js
+
+
+
+[MITM]
+hostname = %APPEND% api.tiantiantiaosheng.com

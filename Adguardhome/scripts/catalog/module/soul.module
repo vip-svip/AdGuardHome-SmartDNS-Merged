@@ -1,0 +1,12 @@
+#!name=Soul
+#!desc=Soul解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+Soul=type=http-response,pattern=^http[s]?:\/\/(api-chat.soulapp.cn|.*)\/(chat/limitInfo|vip/meet/userInfo|loveBell/queryMatchSpeedupConf),requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/Soul.js
+
+
+
+[MITM]
+hostname = %APPEND% (.*|api-chat.soulapp.cn)

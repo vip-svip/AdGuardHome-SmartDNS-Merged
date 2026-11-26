@@ -1,0 +1,6 @@
+#!name=今日平台热榜
+#!desc=在platform=和count=中填入参数 platform参数有：微博 知乎 微信 今日头条 澎湃 百度 36氪 少数派 财新 ZAKER 新京报 南方周末 科普中国 威锋网 起点小说 纵横小说 北美票房。不填默认今日头条。count是显示条数 不填默认显示6条。示例：platform=微博&count=4
+#!homepage=https://yfamilys.com
+
+[Script]
+今日平台热榜=type=cron,script-path=https://raw.githubusercontent.com/deezertidal/private/main/hotoday.js,cronexp="16 16 16 ? * *",wake-system=1,argument=platform=&count=

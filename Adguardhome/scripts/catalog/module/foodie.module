@@ -1,0 +1,12 @@
+#!name=Foodie
+#!desc=Foodie解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+yiruikecorp=type=http-response,pattern=^https:\/\/purchase-foodiecn-api\.yiruikecorp\.com\/v1\/purchase\/subscription\/subscriber\/status,requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/yiruikecorp.js
+
+
+
+[MITM]
+hostname = %APPEND% purchase-foodiecn-api.yiruikecorp.com

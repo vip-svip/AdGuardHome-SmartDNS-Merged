@@ -1,0 +1,12 @@
+#!name=柚子轻断食
+#!desc=柚子轻断食解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+jingcle=type=http-response,pattern=^http[s]?:\/\/xy.jingcle.com\/api\/user\/info,requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/jingcle.js
+
+
+
+[MITM]
+hostname = %APPEND% xy.jingcle.com

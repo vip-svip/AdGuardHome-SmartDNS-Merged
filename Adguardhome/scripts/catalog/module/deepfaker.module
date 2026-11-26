@@ -1,0 +1,12 @@
+#!name=DeepFaker换脸
+#!desc=DeepFaker换脸解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+deepfaker=type=http-response,pattern=^https:\/\/api\.deepfaker\.app\/api\/v1\/account\/update-profile,requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/deepfaker.js
+
+
+
+[MITM]
+hostname = %APPEND% api.deepfaker.app

@@ -1,0 +1,6 @@
+﻿#!name=网易云热歌榜
+#!desc=网易云热歌榜
+#!homepage=https://yfamilys.com
+
+[Script]
+网易云热歌榜=type=cron,script-path=https://raw.githubusercontent.com/deezertidal/private/main/nm.js,cronexp="19 19 19 ? * *",wake-system=1

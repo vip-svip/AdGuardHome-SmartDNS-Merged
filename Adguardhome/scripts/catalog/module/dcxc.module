@@ -1,0 +1,11 @@
+#!name=多彩相册
+#!desc=多彩相册解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/.png
+#!homepage=https://yfamily.ml
+#!author=89996462
+[Script]
+yuan9=type=http-response,pattern=^http[s]?:\/\/photo.yuan9.cn\/api\/Auth\/info,requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/yuan9.js
+
+
+[MITM]
+hostname = %APPEND% photo.yuan9.cn

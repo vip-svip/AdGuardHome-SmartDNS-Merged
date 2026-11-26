@@ -1,0 +1,12 @@
+#!name=PeakVisor
+#!desc=PeakVisor解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+routes=type=http-response,pattern=^https:\/\/routes\.tips\/api\/peakvisor\/v1\/purchase\/verifyReceipt,requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/routes.js
+
+
+
+[MITM]
+hostname = %APPEND% routes.tips

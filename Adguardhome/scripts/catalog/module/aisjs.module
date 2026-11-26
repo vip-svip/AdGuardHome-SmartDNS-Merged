@@ -1,0 +1,11 @@
+#!name=Al设计师
+#!desc=Al设计师解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+aimusician=type=http-response,pattern=^http[s]?:\/\/painting-api.aimusician.cc\/user\/info\/getMyMaterial,requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/aimusician.js
+
+
+[MITM]
+hostname = %APPEND% painting-api.aimusician.cc

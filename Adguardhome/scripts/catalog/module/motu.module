@@ -1,0 +1,12 @@
+#!name=魔图
+#!desc=魔图解锁
+#!icon=https://raw.githubusercontent.com/deezertidal/private/main/icons/Plugallery.png
+#!homepage=https://yfamilys.com
+#!author=89996462
+[Script]
+doglobal=type=http-response,pattern=^http[s]?:\/\/pay-motu.doglobal.net/pay/apple/check,requires-body=1,script-path=https://raw.githubusercontent.com/89996462/Quantumult-X/main/ycdz/doglobal.js
+
+
+
+[MITM]
+hostname = %APPEND% pay-motu.doglobal.net
