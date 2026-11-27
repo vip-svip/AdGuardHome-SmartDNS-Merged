@@ -189,12 +189,22 @@ if [ "$PLO" = "1" ]; then
     iptables -w 2 -S AGH_WEBUI >/dev/null 2>&1 && ok "AGH_WEBUI 链存在" || bad "panel_lan_only=1 但 AGH_WEBUI 链不存在"
     WI=$(iptables -S INPUT 2>/dev/null | _gr -c -- '-j AGH_WEBUI')
     [ "$WI" = "1" ] && ok "INPUT 恰好一条 AGH_WEBUI 跳转" || bad "INPUT 的 AGH_WEBUI 跳转数=$WI"
+    # 守护在开机/回写窗口里会 A/B 换链（建 AGH_WEBUI_N 再改名），这一瞬间读 AGH_WEBUI
+    # 可能拿到空表或半张表。逐端口各读一次就是三次竞态采样，实测会出现「链明明是对的、
+    # 却报某端口未 DROP」的假 FAIL。改成先取一份快照、最多重试 3 次，再本地逐条判。
+    _webui_snap=""
+    for _wtry in 1 2 3; do
+        _webui_snap=$(iptables -w 2 -S AGH_WEBUI 2>/dev/null)
+        printf '%s\n' "$_webui_snap" | _gr -q -- '--dport 40251 -j DROP' && break
+        sleep 1
+    done
     for p in 40251 6080 6081; do
-        iptables -S AGH_WEBUI 2>/dev/null | _gr -q -- "--dport $p -j DROP" && ok "面板端口 $p 对外 DROP" || bad "面板端口 $p 未 DROP"
+        printf '%s\n' "$_webui_snap" | _gr -q -- "--dport $p -j DROP" && ok "面板端口 $p 对外 DROP" || bad "面板端口 $p 未 DROP"
     done
     # 顺序判断必须用「同一次 iptables 快照」：守护会在开机窗口里 A/B 换链，
     # 分两次调用取样，中间链被重建就把第二条取成空 → 假 FAIL（PJD110 上实测踩到）。
-    SUI=$(iptables -S AGH_WEBUI 2>/dev/null)
+    SUI=$(printf '%s\n' "$_webui_snap")
+    [ -n "$SUI" ] || SUI=$(iptables -S AGH_WEBUI 2>/dev/null)
     LN=$(printf '%s\n' "$SUI" | _gr -n -- '--dport 40251 -j DROP' | cut -d: -f1 | head -1)
     LR=$(printf '%s\n' "$SUI" | _gr -n -- '-s 192.168' | cut -d: -f1 | head -1)
     if [ -z "$LN" ] || [ -z "$LR" ]; then
@@ -398,6 +408,28 @@ _pg_j=$(printf '%s' "$_pg" | _gr -c 'SHELL_JUMP|privacy-page')
 _shell=$(curl -s -m 5 "http://$HOST:6081/privacy.html" 2>/dev/null | _gr -c '/cgi-bin/privacy-page')
 [ "${_shell:-0}" -ge 1 ] && ok "直连 privacy.html 会立刻跳到 CGI 版（$_shell 处）" \
                          || bad "privacy.html 缺跳转壳（直连静态仍会吃缓存）"
+
+# 12.0b 页面加载后零自动核对：8 个开关必须和 DNS/VPN/IP 那三个一样，静置时不自变。
+#       旧版有两个自动核对点（页面内延迟回 GET、切回前台再 GET），任一失败就把整页画成
+#       「已关闭」，下一次成功再翻回「已开启」——那就是用户看到的「关一下再打开」。
+_auto=$(printf '%s' "$_ph_html" | _gr -c 'setTimeout(load')
+[ "${_auto:-0}" -eq 0 ] && ok "privacy.html 已删除延迟自动核对（加载后不再自己刷新）" \
+                        || bad "privacy.html 仍在延迟自动核对（$_auto 处，翻转窗口还在）"
+_vis=$(printf '%s' "$_ph_html" | _gr -c 'visibilitychange')
+[ "${_vis:-0}" -eq 0 ] && ok "privacy.html 已删除切前台自动核对（切回不再翻一次）" \
+                        || bad "privacy.html 仍在切前台核对（$_vis 处，切回会翻）"
+_pg_auto=$(printf '%s' "$_pg" | _gr -c 'setTimeout(load|visibilitychange')
+[ "${_pg_auto:-0}" -eq 0 ] && ok "privacy-page 输出同样无任何自动核对（服务端页面一致）" \
+                           || bad "privacy-page 输出里还有自动核对（$_pg_auto 处）"
+_root=$(curl -s -m 5 "http://$HOST:6081/" 2>/dev/null)
+case "$_root" in
+  *"/cgi-bin/privacy-page"*) ok "6081 根入口 / 直接跳免缓存页（用户不用记长路径）" ;;
+  *) bad "6081 根入口不是隐私页（/ 没返回跳转）" ;;
+esac
+case "$_pg" in
+  *2026112802*) ok "privacy-page 构建号 2026112802（可自证是新版）" ;;
+  *) bad "privacy-page 缺新构建号（无法判断浏览器吃的是哪版）" ;;
+esac
 
 # 12.1 真实 DNS 解析：手搓 27 字节 A 查询（八进制转义，mksh/busybox printf 都认）
 _q=/data/local/tmp/.fc_q.bin

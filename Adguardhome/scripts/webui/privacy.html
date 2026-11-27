@@ -64,7 +64,11 @@ window.__AGH_PRIV={"dns":1,"vpn":1,"ip":1,"ntp":1,"dhcp":1,"smb":1,"tcp":1,"snmp
   </div>
   <div class="note">说明：本页只控制本机网络泄露面（DNS / WebRTC / IP 等）。出口 IP 归属由你的网络决定，检测站仍会看到当前公网 IP。</div>
   <div class="msg" id="msg"></div>
-  <div class="note" id="build">构建 20261128 · 首屏真值内联 · 8 个开关统一逻辑</div>
+  <div class="links" style="margin-top:6px">
+    <a href="/cgi-bin/privacy-page?v=20261128">重新载入本页（跳过缓存）</a>
+    <a href="#" id="reload">重新读取状态</a>
+  </div>
+  <div class="note" id="build">构建 2026112802 · 首帧真值内联 · 8 个开关同一套逻辑 · 加载后不再自动刷新</div>
 </div>
 <script>
 var KEYS = ['dns','vpn','ip','ntp','dhcp','smb','tcp','snmp'];
@@ -150,18 +154,6 @@ function norm(j){
   });
   return s;
 }
-(function boot(){
-  if (window.__AGH_PRIV && typeof window.__AGH_PRIV === 'object') {
-    state = norm(window.__AGH_PRIV);
-    paint();
-    return;
-  }
-  // 内联缺失（CGI 挂了/被拦截）：直接显示「读取中」，等下面 load() 的 GET（毫秒级缓存）。
-  // 不再读 localStorage 旧值 —— 那就是「先画成关、再翻成开」的唯一来源。
-  state = null;
-  paint();
-})();
-
 var inflight = false;
 function load(){
   if (inflight) return Promise.resolve();
@@ -169,9 +161,14 @@ function load(){
   return fetch(CUR+'?t='+Date.now(), {cache:'no-store'})
     .then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); })
     .then(function(j){ inflight=false; absorb(j); })
-    .catch(function(){ inflight=false; msg('读取状态失败：隐私守护未就绪（6081 /cgi-bin/privacy 无响应）', 'err');
-      // 失败也要把按钮解开，不能一直卡在「读取中」
-      if (state) paint(); else { state = {}; KEYS.forEach(function(k){ state[k]=0; }); paint(); } });
+    .catch(function(){
+      inflight = false;
+      // 关键：读取失败**绝不**把 state 伪造成「全 0」。
+      // 旧版这里写了 state={}; 全部 0; paint() —— 于是失败一次就整页变「已关闭」，
+      // 稍后任一次 GET 成功又全变「已开启」，这就是用户看到的「关一下再打开」。
+      // 现在失败只是提示一句，屏幕上已有的东西一个像素都不动。
+      msg('读取状态失败（隐私守护未就绪），页面保持当前显示', 'err');
+    });
 }
 
 function toggle(k){
@@ -187,12 +184,26 @@ function toggle(k){
     .catch(function(){ busy[k]=0; paint(); msg('写入失败，状态已回退', 'err'); });
 }
 
-// 内联真值命中：首帧已经画好，900ms 后再往后核对一次（不再让首屏等任何 CGI）；
-// 内联缺失（文件被截断 / cgi 没写进去）才立刻 GET 补。
-if (window.__AGH_PRIV && typeof window.__AGH_PRIV === 'object') setTimeout(load, 900);
-else load();
-// 切回前台再核对一次（后台可能被守护/开机脚本改过）
-document.addEventListener('visibilitychange', function(){ if(!document.hidden) load(); });
+// 首帧真值命中（内联）就**彻底不再自动核对**。
+// 旧版有两处自动核对：进入页面 900 毫秒后回 GET 一次、切回前台再核对一次。
+// 那两处就是翻转窗口 —— 只要有一次 GET 慢或失败，屏上就会先出现「已关闭」再翻回「已开启」。
+// 现在：状态只在三个时刻改变 —— ①首帧内联 ②你点「重新读取」③你自己拨开关。
+// 页面静置时，一个像素都不会自己变，8 个开关完全同一套逻辑，跟 DNS/VPN/IP 那三个没有区别。
+if (window.__AGH_PRIV && typeof window.__AGH_PRIV === 'object') {
+  state = norm(window.__AGH_PRIV);
+  paint();
+} else {
+  state = null;
+  paint();
+  load();
+}
+var reloadBtn = document.getElementById('reload');
+if (reloadBtn) reloadBtn.onclick = function(){
+  // 手动重读：只发请求，**不清屏**。屏上已有按钮一个字都不变，
+  // 只有真值和当前显示不同时才逐行改 —— 因此也不会出现「整页关一下再打开」。
+  reloadBtn.disabled = true; msg('正在重新读取…', 'warn');
+  load().then(function(){ reloadBtn.disabled = false; });
+};
 </script>
 </body>
 </html>

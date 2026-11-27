@@ -44,7 +44,7 @@ else
 fi
 echo "SmartDNS 管理 UI: http://127.0.0.1:6080 (账号 root/root)"
 echo "上游服务器管理:  http://127.0.0.1:6081/upstream-manage.html"
-echo "隐私防护设置:    http://127.0.0.1:6081/privacy.html"
+echo "隐私防护设置:    http://127.0.0.1:6081/  （根入口，自动跳转到免缓存页）"
 echo "内置规则目录:    $MODDIR/rules"
 echo "本地 hosts 文件: $MODDIR/hosts/hosts"
 echo "smartdns 主配置: $SD_CONF   (上游在 servers.conf)"

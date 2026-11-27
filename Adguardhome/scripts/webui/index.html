@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>隐私防护 · 正在进入</title>
+<!--
+  6081 的根入口。为什么要有这个文件：
+  busybox httpd 给静态文件加不了 Cache-Control，浏览器会一直用旧副本，
+  于是 /privacy.html 这一条 URL 你刷新多少次都可能还是几天前的旧页面
+  （旧页面里既有 localStorage 快照分支、也还带着已经删掉的两个引擎开关，
+  表现出来就是「有的开关翻、有的不翻、还多两个开关」）。
+  这里改成：根路径 → 立刻跳到一个**每次都不同**的 URL（带毫秒时间戳），
+  缓存 key 每次都变，物理上不可能再命中旧副本。
+-->
+<meta http-equiv="refresh" content="0;url=/cgi-bin/privacy-page">
+<style>
+body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
+ background:#f4f6f8;color:#6b7280;font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+@media (prefers-color-scheme:dark){body{background:#111418;color:#9aa0a6}}
+.box{text-align:center}
+</style>
+<script>
+// 带毫秒时间戳跳转：每一次进入都是全新的缓存键，缓存里那份旧页面再也不会被命中。
+location.replace('/cgi-bin/privacy-page?v=' + Date.now());
+</script>
+</head>
+<body>
+<div class="box">
+  <div>正在进入隐私防护设置…</div>
+  <div style="font-size:12px;margin-top:8px">若 2 秒后仍停在当前页，点这里：<a href="/cgi-bin/privacy-page">打开设置页</a></div>
+</div>
+</body>
+</html>
