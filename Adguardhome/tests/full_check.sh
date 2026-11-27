@@ -54,7 +54,7 @@ case "$MJ" in https://*) ok "module.prop 自带 updateJson" ;; *) bad "module.pr
 # 真机踩过：包内容已大改但版本号停在旧日期，且 update.json 的 zipUrl 硬编码旧文件名，
 # 结果模块「检查更新」永远不提示（用户拿不到修复）。
 UV=""
-for u in "$MODDIR/../update.json" /data/local/tmp/update.json "$AGH_DIR/update.json"; do
+for u in "$AGH_DIR/update.json" "$MODDIR/../update.json" /data/local/tmp/update.json; do
     [ -f "$u" ] && { UV=$u; break; }
 done
 if [ -n "$UV" ]; then

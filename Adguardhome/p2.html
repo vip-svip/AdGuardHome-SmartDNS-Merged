@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>高级设置 · 隐私防护</title>
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--text:#2b2b2b;--muted:#6b7280;--line:#e5e7eb;--accent:#67b279;--accent-dim:#9aa0a6;--btn:#eef1f4;--warn:#d08b2c}
+@media (prefers-color-scheme:dark){:root{--bg:#111418;--card:#1b2026;--text:#e8eaed;--muted:#9aa0a6;--line:#2a3138;--accent:#5fbf82;--btn:#232a31;--warn:#e0a94a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:20px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 18px 6px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.row{display:flex;align-items:flex-start;gap:14px;padding:14px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.row .t{font-weight:600;margin-bottom:4px}
+.row .d{color:var(--muted);font-size:13px}
+.row .c{margin-left:auto;flex:0 0 auto}
+button.sw{min-width:86px;border:1px solid transparent;border-radius:999px;padding:8px 14px;font-size:14px;cursor:pointer;transition:.15s;font-variant-numeric:tabular-nums}
+button.on{background:var(--accent);color:#0b1a10}
+button.off{background:var(--btn);color:var(--muted)}
+button.busy{background:var(--btn);color:var(--accent);cursor:progress}
+button.sw:disabled{cursor:progress}
+h2{font-size:15px;margin:26px 0 10px}
+.links{display:flex;flex-wrap:wrap;gap:8px}
+.links a{display:inline-block;padding:8px 12px;border:1px solid var(--line);border-radius:8px;color:var(--text);text-decoration:none;font-size:13px;background:var(--card)}
+.links a:hover{border-color:var(--accent)}
+.note{color:var(--muted);font-size:12px;margin-top:14px}
+.msg{font-size:13px;margin-top:10px;min-height:18px}
+.msg.ok{color:var(--accent)}
+.msg.err{color:#e06c75}
+.msg.warn{color:var(--warn)}
+</style>
+<!-- 首屏真值直接静态内联：这一行由 cgi-bin/privacy 在每次状态变化时原地改写。
+     不再用 <script src="?embed=1"> 二次请求——静态文件 30ms 就到，页面第一帧
+     就是最终值；浏览器来不及把上一帧（可能是旧的「已关闭」）继续留在屏幕上，
+     于是不会再出现「关一下再打开」。 -->
+<meta http-equiv="Cache-Control" content="no-store">
+<script>
+window.__AGH_PRIV={"dns":1,"vpn":1,"ip":1,"ntp":1,"dhcp":1,"smb":1,"tcp":1,"snmp":1};
+</script>
+</head>
+<body>
+<div class="wrap">
+  <h1>高级设置 · 隐私防护</h1>
+  <div class="sub">防 DNS / VPN / IP / NTP / DHCP / 局域网 / 明文协议 / SNMP 泄露 · 由本机 iptables 与 AGH 解析链生效</div>
+  <div class="card" id="rows"></div>
+
+  <h2>一键过检测</h2>
+  <div class="links">
+    <a href="https://browserleaks.com/dns" target="_blank" rel="noreferrer">DNS 泄露检测</a>
+    <a href="https://browserleaks.com/webrtc" target="_blank" rel="noreferrer">WebRTC 泄露检测</a>
+    <a href="https://ipleak.net/" target="_blank" rel="noreferrer">IP / 位置检测</a>
+    <a href="https://browserleaks.com/ip" target="_blank" rel="noreferrer">综合检测</a>
+  </div>
+  <div class="note">说明：本页只控制本机网络泄露面（DNS / WebRTC / IP 等）。出口 IP 归属由你的网络决定，检测站仍会看到当前公网 IP。</div>
+  <div class="msg" id="msg"></div>
+  <div class="links" style="margin-top:6px">
+    <a href="/cgi-bin/privacy-page?v=20261128">重新载入本页（跳过缓存）</a>
+    <a href="#" id="reload">重新读取状态</a>
+  </div>
+  <div class="note" id="build">构建 2026112802 · 首帧真值内联 · 8 个开关同一套逻辑 · 加载后不再自动刷新</div>
+</div>
+<script>
+var KEYS = ['dns','vpn','ip','ntp','dhcp','smb','tcp','snmp'];
+var ITEMS = [
+  {k:'dns', t:'防止 DNS 泄露', d:'丢弃 mDNS / SSDP / NetBIOS 探针，全部解析强制走 AGH 加密上游，检测网站看不到运营商 DNS。'},
+  {k:'vpn', t:'防止 VPN 泄露', d:'阻断 STUN / TURN 与 Teredo 隧道协商，WebRTC 暴露不出真实出口；VPN 断开也不回落到本地网络。'},
+  {k:'ip',  t:'防止 IP 泄露', d:'屏蔽 WebRTC ICE 收集所需的 STUN 端口，网站拿不到局域网 IP 与公网映射地址。'},
+  {k:'ntp', t:'防止 NTP 时钟泄露', d:'丢弃出网 NTP 对时请求（UDP 123）。时钟指纹可跨网络关联同一设备；本机时间由系统维护不受影响。'},
+  {k:'dhcp',t:'防止 DHCP 探测泄露', d:'丢弃出网 DHCP 广播（UDP 67）。防恶意热点通过 DHCP 指纹识别设备型号与系统。'},
+  {k:'smb', t:'防止局域网探测泄露', d:'丢弃 NetBIOS / SMB 出网流量（137/139/445）。防内网扫描器读取设备名与共享目录。'},
+  {k:'tcp', t:'防止明文协议泄露', d:'丢弃 Telnet / SMTP / POP3 / IMAP 明文端口出网（23/25/110/143）。防 App 明文回传数据。'},
+  {k:'snmp',t:'防止 SNMP 信息泄露', d:'丢弃 SNMP 查询与陷阱（161/162）。防设备信息（系统版本、接口列表）被读取。'}
+];
+
+var state = null;          // null = 未知（还没拿到真值）
+var busy = {};             // 每个开关的写入中标记
+var CUR = '/cgi-bin/privacy';
+
+function $(id){ return document.getElementById(id); }
+function msg(txt, cls){ var m=$('msg'); m.className='msg'+(cls?(' '+cls):''); m.textContent=txt||''; }
+
+function paint(){
+  var box = $('rows');
+  // 状态未知时**不建任何按钮**：只放一行「正在读取」文字。
+  // 这一条是「关一下再打开」的最后一刀——只要屏幕上从没出现过灰绿色开关，
+  // 就不可能有「先显示已关闭、再翻成已开启」的观感，不管首帧多慢。
+  if (!state) {
+    if (box.children.length !== 1) {
+      box.innerHTML = '<div class="row"><div><div class="t">正在读取开关状态</div>'+
+        '<div class="d">正在从本机读取，通常不到 50 毫秒。</div></div></div>';
+    }
+    return;
+  }
+  // 真值到手后，结构只建一次；之后只改按钮的 class / 文案 / disabled，
+  // 不再整块 innerHTML 重建（重建会闪一下，是「开关自己关掉又打开」的来源之一）
+  if (box.children.length !== ITEMS.length) {
+    box.innerHTML = ITEMS.map(function(it){
+      var on = state && (state[it.k] | 0);
+      return '<div class="row"><div><div class="t">'+it.t+'</div><div class="d">'+it.d+'</div></div>'+
+        '<div class="c"><button class="sw '+(on?'on':'off')+'" data-k="'+it.k+'">'+(on?'已开启':'已关闭')+'</button></div></div>';
+    }).join('');
+    Array.prototype.forEach.call(box.querySelectorAll('button.sw'), function(b){
+      b.onclick = function(){ if(!b.disabled) toggle(b.getAttribute('data-k')); };
+    });
+  }
+  Array.prototype.forEach.call(box.querySelectorAll('button.sw'), function(b){
+    var k = b.getAttribute('data-k');
+    var v = (state && state[k] !== null && state[k] !== undefined) ? (state[k]|0) : null;
+    var cls, label, dis = false;
+    if (busy[k]) { cls='busy'; label='应用中…'; dis=true; }
+    else if (v === null) { cls='off'; label='读取中'; dis=true; }
+    else { cls = v ? 'on' : 'off'; label = v ? '已开启' : '已关闭'; }
+    if (b.className !== 'sw '+cls) b.className = 'sw '+cls;
+    if (b.textContent !== label) b.textContent = label;
+    if (b.disabled !== dis) b.disabled = dis;
+  });
+}
+
+function absorb(j){
+  var s = {};
+  KEYS.forEach(function(k){ s[k] = (j[k]|0) ? 1 : 0; });
+  state = s;
+  msg('');
+  paint();
+}
+
+// 首屏：真值已经静态内联在上面的 <head> 里（cgi-bin/privacy 每次写完状态就改写那一行），
+// 所以第一帧就是最终值，不出现「先全关 → 再逐个翻开」，也不需要额外一次 CGI 请求。
+// 缺失的键记成 null（＝未知），paint 时显示「读取中」而不是「已关闭」：
+// 宁可先显示「读取中」，也不要先画成关、再翻成开——那一下翻转就是用户看到的闪烁。
+//
+// 注意：这里**不再用 localStorage 缓存首屏**（旧版有，是个坑）。
+// 缓存记的是你上次打开页面时的状态；只要你中间关过某个开关、或者刷机/升级把
+// privacy.conf 重置回默认，缓存值就和实际值对不上 —— 首帧按缓存画「已关闭」，
+// 异步 GET 回来再翻「已开启」。表现出来就是「有的开关会关一下再打开、有的不会」：
+// 会翻的恰好是缓存里存着旧值的那几个（你动过的），没动过的（DNS/VPN/IP 这类）
+// 缓存和实际一致，所以看着稳。跟开关本身没关系。
+function norm(j){
+  var s = {};
+  KEYS.forEach(function(k){
+    var v = j[k];
+    s[k] = (v === undefined || v === null) ? null : ((v|0) ? 1 : 0);
+  });
+  return s;
+}
+var inflight = false;
+function load(){
+  if (inflight) return Promise.resolve();
+  inflight = true;
+  return fetch(CUR+'?t='+Date.now(), {cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); })
+    .then(function(j){ inflight=false; absorb(j); })
+    .catch(function(){
+      inflight = false;
+      // 关键：读取失败**绝不**把 state 伪造成「全 0」。
+      // 旧版这里写了 state={}; 全部 0; paint() —— 于是失败一次就整页变「已关闭」，
+      // 稍后任一次 GET 成功又全变「已开启」，这就是用户看到的「关一下再打开」。
+      // 现在失败只是提示一句，屏幕上已有的东西一个像素都不动。
+      msg('读取状态失败（隐私守护未就绪），页面保持当前显示', 'err');
+    });
+}
+
+function toggle(k){
+  if (!state || busy[k]) return;
+  var next = {};
+  KEYS.forEach(function(x){ next[x] = state[x]; });
+  next[k] = state[k] ? 0 : 1;
+  busy[k] = 1; paint();                       // 只把这一行标成「应用中」，不动别的行
+  var body = KEYS.map(function(x){ return x+'='+next[x]; }).join('&');
+  fetch(CUR, {method:'POST', headers:{'Content-Type':'text/plain'}, body:body, cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); })
+    .then(function(j){ busy[k]=0; absorb(j); msg('已生效', 'ok'); })
+    .catch(function(){ busy[k]=0; paint(); msg('写入失败，状态已回退', 'err'); });
+}
+
+// 首帧真值命中（内联）就**彻底不再自动核对**。
+// 旧版有两处自动核对：进入页面 900 毫秒后回 GET 一次、切回前台再核对一次。
+// 那两处就是翻转窗口 —— 只要有一次 GET 慢或失败，屏上就会先出现「已关闭」再翻回「已开启」。
+// 现在：状态只在三个时刻改变 —— ①首帧内联 ②你点「重新读取」③你自己拨开关。
+// 页面静置时，一个像素都不会自己变，8 个开关完全同一套逻辑，跟 DNS/VPN/IP 那三个没有区别。
+if (window.__AGH_PRIV && typeof window.__AGH_PRIV === 'object') {
+  state = norm(window.__AGH_PRIV);
+  paint();
+} else {
+  state = null;
+  paint();
+  load();
+}
+var reloadBtn = document.getElementById('reload');
+if (reloadBtn) reloadBtn.onclick = function(){
+  // 手动重读：只发请求，**不清屏**。屏上已有按钮一个字都不变，
+  // 只有真值和当前显示不同时才逐行改 —— 因此也不会出现「整页关一下再打开」。
+  reloadBtn.disabled = true; msg('正在重新读取…', 'warn');
+  load().then(function(){ reloadBtn.disabled = false; });
+};
+</script>
+</body>
+</html>
