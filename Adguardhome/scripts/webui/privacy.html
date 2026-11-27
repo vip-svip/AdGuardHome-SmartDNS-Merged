@@ -57,6 +57,7 @@ window.__AGH_PRIV={"dns":1,"vpn":1,"ip":1,"ntp":1,"dhcp":1,"smb":1,"tcp":1,"snmp
   </div>
   <div class="note">说明：本页只控制本机网络泄露面（DNS / WebRTC / IP 等）。出口 IP 归属由你的网络决定，检测站仍会看到当前公网 IP。</div>
   <div class="msg" id="msg"></div>
+  <div class="note" id="build">构建 20261128 · 首屏真值内联 · 8 个开关统一逻辑</div>
 </div>
 <script>
 var KEYS = ['dns','vpn','ip','ntp','dhcp','smb','tcp','snmp'];
@@ -80,12 +81,23 @@ function msg(txt, cls){ var m=$('msg'); m.className='msg'+(cls?(' '+cls):''); m.
 
 function paint(){
   var box = $('rows');
-  // 结构只建一次；之后只改按钮的 class / 文案 / disabled，
+  // 状态未知时**不建任何按钮**：只放一行「正在读取」文字。
+  // 这一条是「关一下再打开」的最后一刀——只要屏幕上从没出现过灰绿色开关，
+  // 就不可能有「先显示已关闭、再翻成已开启」的观感，不管首帧多慢。
+  if (!state) {
+    if (box.children.length !== 1) {
+      box.innerHTML = '<div class="row"><div><div class="t">正在读取开关状态</div>'+
+        '<div class="d">正在从本机读取，通常不到 50 毫秒。</div></div></div>';
+    }
+    return;
+  }
+  // 真值到手后，结构只建一次；之后只改按钮的 class / 文案 / disabled，
   // 不再整块 innerHTML 重建（重建会闪一下，是「开关自己关掉又打开」的来源之一）
   if (box.children.length !== ITEMS.length) {
     box.innerHTML = ITEMS.map(function(it){
+      var on = state && (state[it.k] | 0);
       return '<div class="row"><div><div class="t">'+it.t+'</div><div class="d">'+it.d+'</div></div>'+
-        '<div class="c"><button class="sw off" data-k="'+it.k+'" disabled>读取中</button></div></div>';
+        '<div class="c"><button class="sw '+(on?'on':'off')+'" data-k="'+it.k+'">'+(on?'已开启':'已关闭')+'</button></div></div>';
     }).join('');
     Array.prototype.forEach.call(box.querySelectorAll('button.sw'), function(b){
       b.onclick = function(){ if(!b.disabled) toggle(b.getAttribute('data-k')); };
