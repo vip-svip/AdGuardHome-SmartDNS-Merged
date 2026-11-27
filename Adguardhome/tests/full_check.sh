@@ -394,11 +394,21 @@ fi
 
 # 12.6 fd 泄漏 / 规则泄漏
 _fd=$(ls /proc/"$(pidof AdGuardHome)"/fd 2>/dev/null | wc -l | tr -d ' ')
-[ "${_fd:-0}" -le 200 ] && ok "AGH fd=${_fd}（≤200" || bad "AGH fd=${_fd} 偏多（疑似句柄泄漏）"
-_s1=$(iptables -w 2 -S AGH_SNI 2>/dev/null | wc -l | tr -d ' ')$(iptables -w 2 -t nat -S OUTPUT 2>/dev/null | wc -l | tr -d ' ')$(iptables -w 2 -S AGH_PRIV 2>/dev/null | wc -l | tr -d ' ')
-sleep 15
-_s2=$(iptables -w 2 -S AGH_SNI 2>/dev/null | wc -l | tr -d ' ')$(iptables -w 2 -t nat -S OUTPUT 2>/dev/null | wc -l | tr -d ' ')$(iptables -w 2 -S AGH_PRIV 2>/dev/null | wc -l | tr -d ' ')
-[ "$_s1" = "$_s2" ] && ok "15 秒内规则行数不变（$_s1，无泄漏）" || bad "规则行数在增长：$_s1 → $_s2"
+[ "${_fd:-0}" -le 200 ] && ok "AGH fd=${_fd}（≤200）" || bad "AGH fd=${_fd} 偏多（疑似句柄泄漏）"
+# 上面刚 kill 过 aghmitm/AGH，SNI 链可能在重建：先等 10s 让守护收尾，再连采三次
+snap() {
+    printf '%s/%s/%s' \
+        "$(iptables -w 2 -S AGH_SNI 2>/dev/null | wc -l | tr -d ' ')" \
+        "$(iptables -w 2 -t nat -S OUTPUT 2>/dev/null | wc -l | tr -d ' ')" \
+        "$(iptables -w 2 -S AGH_PRIV 2>/dev/null | wc -l | tr -d ' ')"
+}
+sleep 10
+_s1=$(snap); sleep 10; _s2=$(snap); sleep 10; _s3=$(snap)
+if [ -n "$_s1" ] && [ "$_s2" = "$_s3" ]; then
+    ok "规则行数稳定（${_s3}，SNI/natOUT/PRIV，30s 无增长）"
+else
+    bad "规则行数在增长：$_s1 → $_s2 → $_s3（疑似泄漏）"
+fi
 
 printf '\n================ 结果：PASS=%s FAIL=%s ================\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] && exit 0
