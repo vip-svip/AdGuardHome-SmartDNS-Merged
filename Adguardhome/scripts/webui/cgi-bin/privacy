@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # 隐私防护 CGI：读写 /data/adb/agh/privacy.conf 并即时应用 iptables 规则
-# GET  -> {"dns":1,"vpn":1,"ip":1,"applied":1}
-# POST -> body 形如 dns=1&vpn=0&ip=1 （Content-Type: text/plain，避免预检）
+# GET  -> {"dns":1,"vpn":1,"ip":1,"sb":0,"par":0,"applied":1}
+# POST -> body 形如 dns=1&vpn=0&ip=1&sb=1&par=0 （Content-Type: text/plain，避免预检）
 CONF=/data/adb/agh/privacy.conf
 CHAIN=AGH_PRIV
 
@@ -14,15 +14,45 @@ cors() {
 }
 
 load_conf() {
-    DNS=1; VPN=1; IP=1
+    DNS=1; VPN=1; IP=1; SB=0; PAR=0
     [ -f "$CONF" ] || return 0
     DNS=$(sed -n 's/^dns=//p' "$CONF" 2>/dev/null | head -1); [ -n "$DNS" ] || DNS=1
     VPN=$(sed -n 's/^vpn=//p' "$CONF" 2>/dev/null | head -1); [ -n "$VPN" ] || VPN=1
     IP=$(sed -n 's/^ip=//p'  "$CONF" 2>/dev/null | head -1); [ -n "$IP" ]  || IP=1
+    SB=$(sed -n 's/^sb=//p'  "$CONF" 2>/dev/null | head -1); [ -n "$SB" ]  || SB=0
+    PAR=$(sed -n 's/^par=//p' "$CONF" 2>/dev/null | head -1); [ -n "$PAR" ] || PAR=0
 }
 
 save_conf() {
-    printf 'dns=%s\nvpn=%s\nip=%s\n' "$DNS" "$VPN" "$IP" > "$CONF" 2>/dev/null
+    printf 'dns=%s\nvpn=%s\nip=%s\nsb=%s\npar=%s\n' "$DNS" "$VPN" "$IP" "$SB" "$PAR" > "$CONF" 2>/dev/null
+}
+
+# AGH 面板 API：POST /control/safebrowsing|parental/enable|disable（basic auth）
+AGH_API="http://127.0.0.1:40251/control"
+agh_set() { # $1=safebrowsing|parental  $2=enable|disable
+    curl -s -o /dev/null -m 5 -u "root:root" -X POST "$AGH_API/$1/$2" 2>/dev/null \
+      || wget -q -O /dev/null --timeout=5 --user=root --password=root --method=POST "$AGH_API/$1/$2" 2>/dev/null
+}
+
+# SB/Parental 开启预检：AGH 的 SB/Parental 引擎上游是 family.adguard-dns.com:443 DoH，
+# 该服务端在部分网络不可达；不可达时开启 SB 会阻塞 AGH 全部 DNS 查询（整机断网）。
+# 预检方式：直连服务端 IP:443（TCP 握手即可，4s 内成功=可达）。返回 0=可达 1=不可达。
+sb_upstream_ok() {
+    # 94.140.14.x/15.x = family.adguard-dns.com 当前 A 记录（静态内置，避免再依赖 DNS）
+    for ip in 94.140.14.14 94.140.15.15 94.140.14.34 94.140.15.34; do
+        timeout 4 sh -c "echo > /dev/tcp/$ip/443" 2>/dev/null && return 0
+    done
+    # 兜底：curl 直连 IP DoH（退出码 0/22 都算服务端可达）
+    curl -s -o /dev/null -m 4 'https://94.140.14.14/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDb3JnAAABAAE' 2>/dev/null
+    c=$?
+    [ "$c" = "0" ] || [ "$c" = "22" ] && return 0
+    return 1
+}
+
+agh_status() { # $1=safebrowsing|parental  -> 1/0
+    v=$(curl -s -m 5 -u "root:root" "$AGH_API/$1/status" 2>/dev/null | grep -o '"enabled":[a-z]*' | grep -o 'true\|false')
+    [ "$v" = "true" ] && { echo 1; return; }
+    echo 0
 }
 
 ipt() { iptables -w 2 "$@" 2>/dev/null || iptables "$@" 2>/dev/null; }
@@ -91,18 +121,31 @@ case "$REQUEST_METHOD" in
         case "$body" in *dns=*) DNS=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^dns=//p' | head -1);; esac
         case "$body" in *vpn=*) VPN=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^vpn=//p' | head -1);; esac
         case "$body" in *ip=*)  IP=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^ip=//p'  | head -1);; esac
+        case "$body" in *sb=*)  SB=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^sb=//p'  | head -1);; esac
+        case "$body" in *par=*) PAR=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^par=//p' | head -1);; esac
         case "$DNS" in 0|1) ;; *) DNS=1 ;; esac
         case "$VPN" in 0|1) ;; *) VPN=1 ;; esac
         case "$IP"  in 0|1) ;; *) IP=1  ;; esac
+        case "$SB"  in 0|1) ;; *) SB=0  ;; esac
+        case "$PAR" in 0|1) ;; *) PAR=0 ;; esac
+        # SB/Parental 开启前预检上游可达性（不可达强开会导致 AGH 全部查询阻塞→整机断网）
+        SB_BLOCKED=0; PAR_BLOCKED=0
+        if [ "$SB" = "1" ] && ! sb_upstream_ok; then SB=0; SB_BLOCKED=1; fi
+        if [ "$PAR" = "1" ] && ! sb_upstream_ok; then PAR=0; PAR_BLOCKED=1; fi
         save_conf
-        apply
+        # SB/Parental 走 AGH 原生 API（引擎在 fork 里，开了就是系统级）
+        [ "$SB" = "1" ] && agh_set safebrowsing enable || agh_set safebrowsing disable
+        [ "$PAR" = "1" ] && agh_set parental enable || agh_set parental disable
         cors
-        printf '{"dns":%s,"vpn":%s,"ip":%s,"applied":1}\n' "$DNS" "$VPN" "$IP"
+        printf '{"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"sb_blocked":%s,"par_blocked":%s,"applied":1}\n' "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$SB_BLOCKED" "$PAR_BLOCKED"
         ;;
     *)
         load_conf
         apply
+        # GET 时以 AGH 实时状态为准（外部改动也能反映）
+        SB=$(agh_status safebrowsing)
+        PAR=$(agh_status parental)
         cors
-        printf '{"dns":%s,"vpn":%s,"ip":%s,"applied":1}\n' "$DNS" "$VPN" "$IP"
+        printf '{"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"applied":1}\n' "$DNS" "$VPN" "$IP" "$SB" "$PAR"
         ;;
 esac

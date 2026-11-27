@@ -941,6 +941,12 @@ if [ ! -f "$_REWRITE_DIR/default.rewrite" ]; then
         [ -f "$_src" ] && { cp -f "$_src" "$_REWRITE_DIR/default.rewrite" 2>/dev/null; break; }
     done
 fi
+if [ ! -f "$_REWRITE_DIR/privacy.rewrite" ]; then
+    for _src in "$AGH_DIR/scripts/rewrite/privacy.rewrite" "$MODDIR/scripts/rewrite/privacy.rewrite" \
+                "/data/adb/modules/AdGuardHome/scripts/rewrite/privacy.rewrite"; do
+        [ -f "$_src" ] && { cp -f "$_src" "$_REWRITE_DIR/privacy.rewrite" 2>/dev/null; break; }
+    done
+fi
 _certs_sh="$SCRIPT_DIR/certs_install.sh"
 [ -f "$_certs_sh" ] && sh "$_certs_sh" >/dev/null 2>&1 &
 # 改写脚本运行时：aghmitm（用模块内置 MITM CA 做 TLS 解密 + URL 重写）
@@ -953,7 +959,7 @@ fi
 fi
 _privacy_cgi="$SCRIPT_DIR/webui/cgi-bin/privacy"
 if [ -f "$_privacy_cgi" ]; then
-    [ -f "$AGH_DIR/privacy.conf" ] || printf 'dns=1\nvpn=1\nip=1\n' > "$AGH_DIR/privacy.conf" 2>/dev/null
+    [ -f "$AGH_DIR/privacy.conf" ] || printf 'dns=1\nvpn=1\nip=1\nsb=0\npar=0\n' > "$AGH_DIR/privacy.conf" 2>/dev/null
     sh "$_privacy_cgi" --apply >/dev/null 2>&1 &
 fi
 # 过滤器缓存为空时自动重新下载（全新安装 / 跨版本升级后必备，否则没有拦截效果）
