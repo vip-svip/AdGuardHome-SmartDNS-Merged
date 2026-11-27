@@ -67,7 +67,6 @@ var ITEMS = [
 var state = null;          // null = 未知（还没拿到真值）
 var busy = {};             // 每个开关的写入中标记
 var CUR = '/cgi-bin/privacy';
-var CACHE_KEY = 'agh_priv_state_v2';
 
 function $(id){ return document.getElementById(id); }
 function msg(txt, cls){ var m=$('msg'); m.className='msg'+(cls?(' '+cls):''); m.textContent=txt||''; }
@@ -102,16 +101,21 @@ function absorb(j){
   var s = {};
   KEYS.forEach(function(k){ s[k] = (j[k]|0) ? 1 : 0; });
   state = s;
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify(s)); } catch(e){}
   msg('');
   paint();
 }
 
-// 首屏：服务器把真值内联进来了（<head> 里 sync 引的 ?embed=1），
+// 首屏：服务器把真值内联进来了（<head> 里 sync 引的 ?embed=1，实测 130~156ms 必达），
 // 直接按真值画，不出现「先全关 → 再逐个翻开」的闪烁。
-// 内联缺失（CGI 挂了）才退回 localStorage 缓存 / 未知态。
 // 缺失的键记成 null（＝未知），paint 时显示「读取中」而不是「已关闭」：
 // 宁可先显示「读取中」，也不要先画成关、再翻成开——那一下翻转就是用户看到的闪烁。
+//
+// 注意：这里**不再用 localStorage 缓存首屏**（旧版有，是个坑）。
+// 缓存记的是你上次打开页面时的状态；只要你中间关过某个开关、或者刷机/升级把
+// privacy.conf 重置回默认，缓存值就和实际值对不上 —— 首帧按缓存画「已关闭」，
+// 异步 GET 回来再翻「已开启」。表现出来就是「有的开关会关一下再打开、有的不会」：
+// 会翻的恰好是缓存里存着旧值的那几个（你动过的），没动过的（DNS/VPN/IP 这类）
+// 缓存和实际一致，所以看着稳。跟开关本身没关系。
 function norm(j){
   var s = {};
   KEYS.forEach(function(k){
@@ -123,14 +127,13 @@ function norm(j){
 (function boot(){
   if (window.__AGH_PRIV && typeof window.__AGH_PRIV === 'object') {
     state = norm(window.__AGH_PRIV);
-    try { localStorage.setItem(CACHE_KEY, JSON.stringify(state)); } catch(e){}
     paint();
     return;
   }
-  var cached = null;
-  try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch(e){}
-  if (cached && typeof cached === 'object') { state = cached; paint(); msg('正在与守护进程核对状态…'); }
-  else { state = null; paint(); }
+  // 内联缺失（CGI 挂了/被拦截）：直接显示「读取中」，等下面 load() 的 GET（毫秒级缓存）。
+  // 不再读 localStorage 旧值 —— 那就是「先画成关、再翻成开」的唯一来源。
+  state = null;
+  paint();
 })();
 
 var inflight = false;
