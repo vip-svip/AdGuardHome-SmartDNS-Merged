@@ -1044,9 +1044,11 @@ start_helper "$SCRIPT_DIR/ProxyConfig.sh"
 # 历史实现锁了 ADGPATH 下全部 *.sh，导致：adb push 报 Operation not permitted、
 # chmod 报 Operation not permitted、卸载时 uninstall.sh 自己也被锁住。
 find "$ADGPATH" -type f -name "*.sh" -exec chmod 755 {} \; 2>/dev/null
-for _f in action.sh uninstall.sh; do
-    [ -f "$ADGPATH/$_f" ] && chattr +i "$ADGPATH/$_f" 2>/dev/null
-done
+# 模块目录里的文件一律不加 immutable：KernelSU/Magisk 应用更新时要把旧目录整棵
+# rm -rf 再搬 modules_update 进来，只要有一个 +i（含目录上的 I 标志）就会删不动，
+# 表现是「包刷进去了、res? 重启后还是旧版」。真机复现过一次：模块目录里
+# scripts/webui/cgi-bin 及若干 cgi 带 I/i 标志，模块停在 11-25 的旧构建。
+# 防篡改只锁 $SCRIPT_DIR（/data/adb/agh/scripts，不在模块目录里，替换不经过它）。
 for _f in "$SCRIPT_DIR"/*.sh; do
     [ -f "$_f" ] && chattr +i "$_f" 2>/dev/null
 done
