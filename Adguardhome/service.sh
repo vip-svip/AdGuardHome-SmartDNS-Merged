@@ -661,6 +661,17 @@ start_webui() {
 }
 start_webui
 
+# 6081 管理面缓存预热：scripts/apps/certs/mitm 的列表响应冷算要 0.3~1.6s，
+# 首访时前端会先渲染空态再填充（看起来像「刷新后先是空的」）。
+# 这里开机后台各打一次强制重建，页面首访就是直接命中缓存。
+(
+    sleep 3
+    curl -s -m 10 -o /dev/null "http://127.0.0.1:6081/cgi-bin/privacy?sync=1" 2>/dev/null
+    for _c in scripts apps certs mitm; do
+        curl -s -m 15 -o /dev/null "http://127.0.0.1:6081/cgi-bin/$_c?rebuild=1" 2>/dev/null
+    done
+) >/dev/null 2>&1 &
+
 # ---------------------------------------------------------------
 # 过滤器自愈：全新安装 / 升级后 rules/subscriptions 被清空时，AGH 不会主动
 # 重新下载（要等 filters_update_interval 到期），表现是「装了模块但广告照样弹」。
