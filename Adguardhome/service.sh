@@ -230,6 +230,29 @@ trap 'rm -rf "$SVC_LOCK_DIR" 2>/dev/null' EXIT INT TERM HUP
 # 解锁脚本防篡改保护
 find "$ADGPATH" -type f -name "*.sh" -exec chattr -i {} \; 2>/dev/null
 
+# 权限自愈：老版本的包只给 sd-restart.sh / iptables.sh 赋了 755，其余脚本和
+# bin/ 下三个二进制靠 unzip 的 umask，某些 KernelSU/Magisk 版本会丢 exec 位
+# （真机实测 aghmitm / certs_install.sh 装完是 644），表现是「进程起不来、
+# 证书装不上，但面板和日志一切正常」。每次开机无条件补齐。
+for _h in "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/certs_install.sh; do
+    [ -f "$_h" ] && chmod 755 "$_h" 2>/dev/null
+done
+for _h in "$BIN_DIR"/AdGuardHome "$BIN_DIR"/aghmitm "$BIN_DIR"/dnsenc; do
+    [ -f "$_h" ] && chmod 755 "$_h" 2>/dev/null
+done
+for _h in "$SCRIPT_DIR"/webui/cgi-bin/*; do
+    [ -f "$_h" ] && chmod 755 "$_h" 2>/dev/null
+done
+chmod 644 "$SCRIPT_DIR"/config.prop "$SCRIPT_DIR"/sni_filter.awk 2>/dev/null
+
+# 开机尽早建 SNI/QUIC 链：原来这一段要等到 AGH 起来、boot_completed+12s 之后才跑，
+# 真机 trace 实测 NFQUEUE 拦截在开机后约 70 秒才出现（这段时间 SNI/QUIC 完全不拦）。
+# 建链本身不依赖 AGH（--queue-bypass 保证 AGH 不在时直通），所以这里先建一次，
+# 后面的「开机确定性重建」只做校验与兜底。
+if [ -f "$SCRIPT_DIR/iptables.sh" ]; then
+    sh "$SCRIPT_DIR/iptables.sh" --sni-force >/dev/null 2>&1
+fi
+
 # 系统语言检测
 locale=$(getprop persist.sys.locale)
 [ -z "$locale" ] && locale="zh"
@@ -1080,7 +1103,7 @@ while [ $(( $(date +%s) - _boot_t0 )) -lt 40 ]; do
         break
     fi
     if [ -f "$SCRIPT_DIR/iptables.sh" ]; then
-        sh "$SCRIPT_DIR/iptables.sh" --once >/dev/null 2>&1
+        sh "$SCRIPT_DIR/iptables.sh" --sni-force >/dev/null 2>&1
     fi
     sleep 3
 done

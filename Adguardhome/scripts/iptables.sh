@@ -209,7 +209,9 @@ io.nekohasekai.sagernet com.hxtunnel.vpn com.netrino.v2rayapp dev.minios.tgwspro
 # 单次模式：由 6081 管理页切 vpn_compat 后同步重建一次，立刻生效（不等守护循环的 5 秒）
 ONCE=0
 V6ONLY=0
+SNIFORCE=0
 [ "$1" = "--once" ] && ONCE=1
+[ "$1" = "--sni-force" ] && SNIFORCE=1
 # --v6：只重建 IPv6 那套规则（v4 的 ADGUARD 链保持原样）。
 # 切换 v6_dns 模式时绝不能顺手把 v4 劫持拆掉 —— 那几百毫秒 DNS 是裸奔的。
 [ "$1" = "--v6" ] && V6ONLY=1
@@ -231,7 +233,7 @@ fi
 # pkill 守护后短暂存活的孤儿子壳、外部 wrapper（timeout/sh -x）同样造成误判
 # -> 重启竞态下新守护静默退出（实测 r3a/r3g）。改 pid 文件 + /proc 核对。
 _daemon_pidf="$AGH_DIR/.ipt_daemon.pid"
-if [ $ONCE -eq 0 ] && [ $V6ONLY -eq 0 ]; then
+if [ $ONCE -eq 0 ] && [ $V6ONLY -eq 0 ] && [ $SNIFORCE -eq 0 ]; then
     _opid="$(cat "$_daemon_pidf" 2>/dev/null)"
     if [ -n "$_opid" ] && [ "$_opid" != "$$" ] && [ -d "/proc/$_opid" ]; then
         _ocmd="$(tr '\0' ' ' < "/proc/$_opid/cmdline" 2>/dev/null)"
@@ -707,7 +709,22 @@ sni_want() {
 }
 
 sni_chain_down() {
+    # 与 sni_chain_up 共用同一把重建锁：拆链和建链同时跑会把临时链互相删掉。
+    _sl="$AGH_DIR/.sni.build.lock"
+    _sn=0
+    while ! mkdir "$_sl" 2>/dev/null; do
+        _sn=$((_sn + 1))
+        if [ "$_sn" -ge 40 ]; then rm -rf "$_sl"; fi
+        sleep 0.1
+    done
     for _ipt in iptables ip6tables; do
+        # 顺带清掉原子重建用的临时链（-E 失败时 OUTPUT 可能还挂在 AGH_SNIN 上）
+        _n=0
+        while "$_ipt" $IPT_W -t filter -D OUTPUT -j "AGH_SNIN" 2>/dev/null; do
+            _n=$((_n + 1)); [ "$_n" -ge 10 ] && break
+        done
+        "$_ipt" $IPT_W -t filter -F "AGH_SNIN" 2>/dev/null
+        "$_ipt" $IPT_W -t filter -X "AGH_SNIN" 2>/dev/null
         # -D 循环删挂载（上限 10 次，防历史多次 -I 残留导致 -X 引用计数非零）
         _n=0
         while "$_ipt" $IPT_W -t filter -D OUTPUT -j "$SNI_CHAIN" 2>/dev/null; do
@@ -722,40 +739,125 @@ sni_chain_down() {
             "$_ipt" -X "$SNI_CHAIN" 2>/dev/null
         fi
     done
+    rmdir "$_sl" 2>/dev/null
+    rm -rf "$_sl" 2>/dev/null
 }
 
 sni_chain_up() {
     # $1 = queue_num, $2 = ports（逗号分隔）, $3 = drop_quic(1/0)
+    #
+    # 跨进程互斥（2026-11-27 真机实证）：开机时 service.sh 每 3 秒跑一次 --once、
+    # 守护循环每 5 秒跑一次 sni_sync，两个进程会同时调到这里。原子重建用的是固定
+    # 临时链名 AGH_SNIN，并发时 A 建好 AGH_SNIN、B 把它 -X 掉重建，A 的 -A 就报
+    # 「No chain/target/match by that name」，A 的 -E 也失败并留下「挂着 AGH_SNIN」
+    # 的半成品；两边再互相 -F/-X AGH_SNI，最后 SNI 链干脆整条消失（真机 log：
+    # `ip6tables -E FAIL，保持挂在 AGH_SNIN` 之后 `iptables -S AGH_SNI` = 不存在）。
+    # 所以重建必须串行化：mkdir 原子锁 + 40×0.1s 超时强拆（持锁进程已死的场景）。
+    _sl="$AGH_DIR/.sni.build.lock"
+    _sn=0
+    while ! mkdir "$_sl" 2>/dev/null; do
+        _sn=$((_sn + 1))
+        if [ "$_sn" -ge 40 ]; then rm -rf "$_sl"; fi
+        sleep 0.1
+    done
+    #
+    # 原子重建（2026-11-27）：旧实现是「先摘 OUTPUT 挂载 → -F/-X 旧链 → 原地重灌
+    # → 最后才挂回去」，GREP 实测这段窗口里 `iptables -S AGH_SNI` 只有 0~5 条，
+    # 也就是说每次自愈重建都有 100~300ms「SNI/QUIC 完全不拦」的裸奔期；开机时
+    # service.sh 每 3 秒跑一次 --once，这个窗口被自己的启动检测撞上，于是打出
+    # 「40 秒内未建成 SNI 链」，其实链 1 秒后就建好了。
+    # 改法：先在临时链 AGH_SNIN 里把规则灌满（此时 OUTPUT 仍指向旧链，拦截不断），
+    # 灌完再「摘旧挂载 → 删旧链 → -E 改名 → 挂回去」，裸奔窗口从上百条命令缩到
+    # 4~6 条命令。`iptables -E` 会同步更新跳转引用（本机实测 RENAME_OK）。
     _q="$1"
     _pl="$(echo "$2" | tr ',' ' ')"
     _dq="$3"
+    _tmp="AGH_SNIN"
     echo "$(date '+%F %T') sni_chain_up q=[$_q] pl=[$_pl] iptw=[$IPT_W]" >>"$SNI_LOG"
-    sni_chain_down
+
+    # 1) 清掉临时链的历史残留（上次被中断时可能留半成品）
     for _ipt in iptables ip6tables; do
-        "$_ipt" $IPT_W -t filter -N "$SNI_CHAIN" 2>/dev/null
-        "$_ipt" $IPT_W -t filter -F "$SNI_CHAIN" 2>/dev/null
-        "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -o lo -j RETURN 2>/dev/null
-        "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -m owner --uid-owner 0 -j RETURN 2>/dev/null
+        _n=0
+        while "$_ipt" $IPT_W -t filter -D OUTPUT -j "$_tmp" 2>/dev/null; do
+            _n=$((_n + 1)); [ "$_n" -ge 10 ] && break
+        done
+        "$_ipt" $IPT_W -t filter -F "$_tmp" 2>/dev/null
+        "$_ipt" $IPT_W -t filter -X "$_tmp" 2>/dev/null
+        "$_ipt" $IPT_W -t filter -N "$_tmp" 2>/dev/null
+    done
+
+    # 2) 把规则灌进临时链
+    for _ipt in iptables ip6tables; do
+        "$_ipt" $IPT_W -t filter -A "$_tmp" -o lo -j RETURN 2>/dev/null
+        "$_ipt" $IPT_W -t filter -A "$_tmp" -m owner --uid-owner 0 -j RETURN 2>/dev/null
         # 豁免 VPN/代理应用（BoxProxy 共存）
         for _vu in $(vpn_uids); do
-            "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -m owner --uid-owner "$_vu" -j RETURN 2>/dev/null
+            "$_ipt" $IPT_W -t filter -A "$_tmp" -m owner --uid-owner "$_vu" -j RETURN 2>/dev/null
         done
-        "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p tcp --tcp-flags ALL ACK -j RETURN 2>/dev/null
+        "$_ipt" $IPT_W -t filter -A "$_tmp" -p tcp --tcp-flags ALL ACK -j RETURN 2>/dev/null
         # QUIC 拦截：UDP 443 与所有 SNI 端口上的 UDP 全丢，强制回落 TCP（SNI 层才解析得到）
         if [ "$_dq" = "true" ]; then
-            "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p udp --dport 443 -j DROP 2>/dev/null
+            "$_ipt" $IPT_W -t filter -A "$_tmp" -p udp --dport 443 -j DROP 2>/dev/null
             for _qp in $_pl; do
                 case "$_qp" in ""|*[!0-9]*) continue ;; esac
                 [ "$_qp" = "443" ] && continue
-                "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p udp --dport "$_qp" -j DROP 2>/dev/null
+                "$_ipt" $IPT_W -t filter -A "$_tmp" -p udp --dport "$_qp" -j DROP 2>/dev/null
             done
         fi
         for _pt in $_pl; do
-            "$_ipt" $IPT_W -t filter -A "$SNI_CHAIN" -p tcp --dport "$_pt" -j NFQUEUE --queue-num "$_q" --queue-bypass 2>>"$SNI_LOG" || echo "$(date '+%F %T') $_ipt NFQUEUE FAIL dport=[$_pt] q=[$_q] rc=$?" >>"$SNI_LOG"
+            "$_ipt" $IPT_W -t filter -A "$_tmp" -p tcp --dport "$_pt" -j NFQUEUE --queue-num "$_q" --queue-bypass 2>>"$SNI_LOG" || echo "$(date '+%F %T') $_ipt NFQUEUE FAIL dport=[$_pt] q=[$_q] rc=$?" >>"$SNI_LOG"
         done
-        "$_ipt" $IPT_W -t filter -C OUTPUT -j "$SNI_CHAIN" 2>/dev/null || \
-            "$_ipt" $IPT_W -t filter -I OUTPUT 1 -j "$SNI_CHAIN" 2>/dev/null
     done
+
+    # 3) 切换（零空窗）：
+    #    ① 先把 OUTPUT 也挂到临时链（此刻新旧两条同时在跑，最多几毫秒的重复检查，
+    #       NFQUEUE 条数只会变多不会变少）；
+    #    ② 再摘掉旧链的挂载、删旧链；
+    #    ③ `-E AGH_SNIN AGH_SNI` 改名 —— 内核会同步把刚才那条跳转的引用改成新名，
+    #       于是「改名完就已经挂好了」，不需要再摘再挂，sn 窗口为 0。
+    #    若 ① 失败（极少数被其它模块并发改动），退回「先摘旧挂载再补救」的旧路，
+    #    并在日志里留痕，下一轮自愈还能纠正。
+    for _ipt in iptables ip6tables; do
+        _linked=0
+        if "$_ipt" $IPT_W -t filter -C OUTPUT -j "$_tmp" 2>/dev/null || \
+           "$_ipt" $IPT_W -t filter -I OUTPUT 1 -j "$_tmp" 2>/dev/null; then
+            _linked=1
+        fi
+        _n=0
+        while "$_ipt" $IPT_W -t filter -D OUTPUT -j "$SNI_CHAIN" 2>/dev/null; do
+            _n=$((_n + 1)); [ "$_n" -ge 10 ] && break
+        done
+        "$_ipt" $IPT_W -t filter -F "$SNI_CHAIN" 2>/dev/null
+        "$_ipt" $IPT_W -t filter -X "$SNI_CHAIN" 2>/dev/null
+        if "$_ipt" $IPT_W -t filter -E "$_tmp" "$SNI_CHAIN" 2>>"$SNI_LOG"; then
+            :
+        else
+            _has_tmp=$("$_ipt" $IPT_W -S "$_tmp" 2>/dev/null | head -1)
+            _has_old=$("$_ipt" $IPT_W -S "$SNI_CHAIN" 2>/dev/null | head -1)
+            echo "$(date '+%F %T') $$ $_ipt -E FAIL tmp=[${_has_tmp:-none}] old=[${_has_old:-none}]" >>"$SNI_LOG"
+        fi
+        # 兜底：正常情况下上面 -E 已让跳转生效，-C 命中即什么都不做
+        if [ "$_linked" = "1" ]; then
+            "$_ipt" $IPT_W -t filter -C OUTPUT -j "$SNI_CHAIN" 2>/dev/null || \
+                "$_ipt" $IPT_W -t filter -I OUTPUT 1 -j "$SNI_CHAIN" 2>/dev/null
+        else
+            "$_ipt" $IPT_W -t filter -C OUTPUT -j "$_tmp" 2>/dev/null || \
+                "$_ipt" $IPT_W -t filter -I OUTPUT 1 -j "$_tmp" 2>/dev/null
+        fi
+    done
+
+    # 收尾校验：链名换了、规则齐了、跳转唯一，才算建成。不成就在同一把锁里重试一次
+    # （不再递归调用自己，避免锁嵌套）。
+    _okn=$(iptables $IPT_W -S "$SNI_CHAIN" 2>/dev/null | grep -c NFQUEUE)
+    _want_n=$(echo "$_pl" | wc -w | tr -d ' ')
+    if [ "${_okn:-0}" -ne "${_want_n:-11}" ]; then
+        # 条数不等于端口数 = 有重复或漏条（并发残留）。不自作聪明原地补，
+        # 直接清掉状态文件：守护下一轮（5s 内）会以空状态做一次干净重建。
+        echo "$(date '+%F %T') 重建校验不一致（NFQUEUE=${_okn:-0} 期望=${_want_n}），置脏等下一轮重建" >>"$SNI_LOG"
+        rm -f "$SNI_STATE" 2>/dev/null
+    fi
+    rmdir "$_sl" 2>/dev/null
+    rm -rf "$_sl" 2>/dev/null
 }
 
 sni_sync_apply() {
@@ -984,8 +1086,7 @@ mitm_selfheal() {
     fi
 }
 mitm_redirect_apply() {
-    mitm_selfheal
-    # 幂等增删：只删「名单里已不存在」的规则，只补「缺失」的规则。
+    mitm_selfheal    # 幂等增删：只删「名单里已不存在」的规则，只补「缺失」的规则。
     # 早期实现是每次重建都先全删再加，导致守护每 5 秒抖动一次 iptables，
     # 计数器被清零（实测 nat 计数一直读到 0），也白白增加内核开销。
     _want=" $(mitm_uids) "
@@ -1069,6 +1170,25 @@ start_smartdns() {
 last_agh=""
 last_vpnstate="__init__"
 
+# --sni-force：只按当前 yaml 配置原子重建一次 SNI/QUIC 链就退出。
+# 给自检用（full_check 的「重建原子性」断言要真的触发一次重建才能量出裸奔窗口），
+# 也方便排障后手工立刻纠正链，不必等守护的 5 秒 tick。
+if [ "$1" = "--sni-force" ]; then
+    . "$AGH_DIR/scripts/config.prop" 2>/dev/null
+    _fw="$(sni_want)"
+    case "$_fw" in
+        1\|*)
+            _fq=$(echo "$_fw" | awk -F'|' '{print $2}')
+            _fp=$(echo "$_fw" | awk -F'|' '{print $3}')
+            _fd=$(echo "$_fw" | awk -F'|' '{print $4}')
+            sni_chain_up "$_fq" "$_fp" "$_fd"
+            ;;
+        *)  sni_chain_down ;;
+    esac
+    echo "$_fw" > "$SNI_STATE" 2>/dev/null
+    exit 0
+fi
+
 # --once：由 6081 管理页切换 vpn_compat 后同步重建一次就退出，不等守护循环的 5 秒
 # --v6  ：只切 IPv6 模式时用，只碰 v6 的两套链，v4 链一律不动
 if [ $ONCE -eq 1 ] || [ $V6ONLY -eq 1 ]; then
@@ -1100,6 +1220,20 @@ if [ $ONCE -eq 1 ] || [ $V6ONLY -eq 1 ]; then
 fi
 
 _sweep_daemon
+
+# 日志轮转：>2MB 时保留尾部 256KB，原地截断（同一 inode，写入进程的 O_APPEND fd 不受影响）
+rotate_logs() {
+    for _lg in "$AGH_DIR/mitm.log" "$AGH_DIR/bin/crash.log" "$AGH_DIR/agh.log" "$AGH_DIR/dnsenc.log"; do
+        [ -f "$_lg" ] || continue
+        _lsz=$(wc -c < "$_lg" 2>/dev/null | tr -d ' ')
+        [ "${_lsz:-0}" -gt 2097152 ] || continue
+        tail -c 262144 "$_lg" > "$_lg.rot" 2>/dev/null && cat "$_lg.rot" > "$_lg" 2>/dev/null
+        rm -f "$_lg.rot" 2>/dev/null
+        log_vpn "[INFO] 日志轮转：$_lg 由 ${_lsz}B 截到 256KB"
+    done
+    return 0
+}
+
 while true; do
     date +%s > "$AGH_DIR/.daemon_hb" 2>/dev/null
     echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
@@ -1214,6 +1348,15 @@ while true; do
     sni_sync
     mitm_redirect_apply
     vpn_dns_hijack
+
+    # ---- 日志轮转 ----
+    # 真机实测：mitm.log（aghmitm 每 5 秒打 rules loaded）+ bin/crash.log（AGH 自己
+    # 的日志，SNI 计数器每分钟一条）都只写不轮转，长开机几天就上 MB。
+    # 每 12 轮（约 60 秒）查一次，超过 2MB 就「保留尾部 256KB + 原地截断」——
+    # 原地 cat 写同一 inode，进程的 O_APPEND fd 继续追加，不需要重启任何进程。
+    if [ $(( ${_tick:-0} % 12 )) -eq 0 ]; then
+        rotate_logs
+    fi
 
     # ---- 解析自愈看门狗 ----
     # 真机上偶尔会进入「链看着没问题、但系统解析全挂」的状态；实测把劫持链

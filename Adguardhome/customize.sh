@@ -269,9 +269,16 @@ i18n_print "- Extracting AdGuardHome files" "- 正在解压 AdGuardHome 文件"
 unzip -oq "$ZIPFILE" "scripts/*" -d "$AGH_DIR"
 # 脚本同时落到模块目录（KernelSU 卸载/管理页都按模块目录找）
 # webui 必须每次都从 zip 解出来：$MODPATH 下的旧副本会覆盖 $AGH_DIR 里的新文件
-unzip -oq "$ZIPFILE" "scripts/sd-restart.sh" "scripts/iptables.sh" "scripts/webui/*" -d "$MODPATH" 2>/dev/null
-chmod 755 "$MODPATH/scripts/sd-restart.sh" "$MODPATH/scripts/iptables.sh" 2>/dev/null
+# 历史 bug：这里只解了 sd-restart.sh / iptables.sh 两个文件，模块目录里没有
+# certs_install.sh / vpn_dns_sync.sh / ModuleMOD.sh / ProxyConfig.sh / sni_filter.awk /
+# config.prop —— cgi-bin/certs 的 `$MODDIR/scripts/certs_install.sh` 那条路径恒假，
+# 只能靠 $AGH_DIR 兜底；模块目录也就不是自包含的。现在整包 scripts/* 都解。
+unzip -oq "$ZIPFILE" "scripts/*" -d "$MODPATH" 2>/dev/null
+chmod 755 "$MODPATH"/scripts/*.sh 2>/dev/null
+chmod 644 "$MODPATH"/scripts/config.prop "$MODPATH"/scripts/sni_filter.awk 2>/dev/null
+chmod 755 "$MODPATH"/scripts/webui/cgi-bin/* 2>/dev/null
 unzip -oq "$ZIPFILE" "bin/*" -d "$AGH_DIR"
+chmod 755 "$MODPATH"/bin/AdGuardHome "$MODPATH"/bin/aghmitm "$MODPATH"/bin/dnsenc 2>/dev/null
 mkdir -p "$BIN_DIR/data" "$MODPATH/rules" "$MODPATH/rules/subscriptions"
 # 数据目录里的规则目录改为指向模块根目录的软链接，让"我添加的规则"和
 # "网络订阅下载的规则"都真实落在模块根目录里（AGH 只是通过这些路径读写它们）。
@@ -339,6 +346,11 @@ for _c in privacy certs scripts mitm apps upstream; do
     fi
 done
 chmod 644 "$SCRIPT_DIR/webui/upstream-manage.html" 2>/dev/null
+
+# 自检脚本也装一份到设备：升级后可以随时 `sh /data/adb/agh/tests/full_check.sh` 体检，
+# 不用再从电脑推。缺这个文件时 full_check 会跳过 6081 那组断言（不阻断）。
+unzip -oq "$ZIPFILE" 'tests/*' -d "$AGH_DIR" >/dev/null 2>&1
+chmod 755 "$AGH_DIR/tests"/*.sh 2>/dev/null
 
 # 上游管理页也放一份到 smartdns 静态站根：手机直接访问 6080/upstream-manage.html 也能打开
 # 同一份管理页也放进 SmartDNS 真实部署目录，手机上直接访问 6080/upstream-manage.html 也能开
