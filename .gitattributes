@@ -21,3 +21,4 @@ Adguardhome/bin/AdGuardHome binary
 Adguardhome/bin/dnsenc binary
 Adguardhome/bin/aghmitm binary
 Adguardhome/smartdns/usr/** binary
+Adguardhome/META-INF/** text eol=lf

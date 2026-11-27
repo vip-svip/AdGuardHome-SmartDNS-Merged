@@ -139,6 +139,35 @@ class GH:
 
 
 # ---------------------------------------------------------------- 打包
+def _is_exec(rel):
+    """zip 内路径是否需要 755。脚本、三个二进制、cgi-bin 下的 CGI 都要可执行。"""
+    if rel.endswith(".sh"):
+        return True
+    if rel in ("bin/AdGuardHome", "bin/aghmitm", "bin/dnsenc"):
+        return True
+    if rel.startswith("scripts/webui/cgi-bin/"):
+        return True
+    return False
+
+
+# 需要强制 LF 的文本扩展名。Windows 上 core.autocrlf=true 会把 checkout 出来
+# 的脚本变成 CRLF，打 zip 时原样带进包里 → 设备上 sh 报 "syntax error: unexpected '('"、
+# prop 被解析出带 \r 的版本号。CI 在 Linux 上跑不会有这个问题，所以只有本地打包会中招，
+# 偏偏这台机器就是本地打包。
+TEXT_EXTS = (".sh", ".awk", ".prop", ".conf", ".yaml", ".yml", ".json", ".txt",
+             ".html", ".md", ".rewrite", ".list", ".module", ".cgi")
+
+
+def _read_payload(full, rel):
+    """按需读文件内容，文本类强制 LF；其余原样。"""
+    with open(full, "rb") as fh:
+        data = fh.read()
+    if rel.endswith(TEXT_EXTS) or data[:2] == b"#!":
+        if b"\r\n" in data:
+            data = data.replace(b"\r\n", b"\n")
+    return data
+
+
 def build_zip(out_path):
     files = 0
     skipped = 0
@@ -156,9 +185,11 @@ def build_zip(out_path):
                     continue
                 full = os.path.join(root, n)
                 zi = zipfile.ZipInfo.from_file(full, rel)
-                zi.external_attr = (0o644 & 0xFFFF) << 16
+                # 权限位必须写进 zip：Windows 上 checkout 出来的文件没有 exec 位，
+                # 全打成 644 会让手工解包（不经 customize.sh）的可执行文件跑不起来。
+                zi.external_attr = (0o755 if _is_exec(rel) else 0o644) << 16
                 with open(full, "rb") as fh:
-                    z.writestr(zi, fh.read(), compress_type=zipfile.ZIP_DEFLATED)
+                    z.writestr(zi, _read_payload(full, rel), compress_type=zipfile.ZIP_DEFLATED)
                 files += 1
     return files, skipped
 
