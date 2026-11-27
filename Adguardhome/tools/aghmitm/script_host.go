@@ -142,8 +142,15 @@ func loadScripts(dir string) {
 	jsMu.Lock()
 	scripts = out
 	jsMu.Unlock()
-	logf("js scripts loaded: %d", len(out))
+	// 同 rules：只在 JS 脚本集合变化时打日志，别让 5s 心跳刷满 mitm.log
+	jsig := strings.Join(order, "|")
+	if jsig != lastScriptsLog {
+		logf("js scripts loaded: %d", len(out))
+		lastScriptsLog = jsig
+	}
 }
+
+var lastScriptsLog string
 
 // refOfScriptLine 从一行 [Script]/[rewrite_local] 规则里取出
 // (脚本引用, URL 匹配式)。兼容：

@@ -176,7 +176,34 @@ func loadRules(dir string) {
 	rulesMu.Lock()
 	rules = out
 	rulesMu.Unlock()
-	log.Printf("rules loaded: %d", len(out))
+	// 每 5s 会无条件 reload 一次（规则目录热加载）；只有内容变了才打日志，
+	// 否则 mitm.log 每分钟被心跳刷 24 行，2MB 轮转后真正的错误全被截掉。
+	sig := rulesFingerprint(out)
+	if sig != lastRulesLog {
+		log.Printf("rules loaded: %d", len(out))
+		lastRulesLog = sig
+	}
+}
+
+var lastRulesLog string
+
+func rulesFingerprint(out []rule) string {
+	var b strings.Builder
+	// 数量 + 每条动作/匹配式/参数，够用于判断「内容变了没」
+	fmt.Fprintf(&b, "%d|", len(out))
+	for _, r := range out {
+		if r.re != nil {
+			b.WriteString(r.re.String())
+		}
+		b.WriteByte(0)
+		b.WriteString(r.action)
+		b.WriteByte(0)
+		b.WriteString(r.name)
+		b.WriteByte(0)
+		b.WriteString(r.value)
+		b.WriteByte(0)
+	}
+	return b.String()
 }
 
 func matchRule(rawURL string) (rule, bool) {
