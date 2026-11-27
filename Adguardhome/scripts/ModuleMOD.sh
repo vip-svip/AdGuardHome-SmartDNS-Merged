@@ -53,9 +53,9 @@ if ! ( set -C; echo $$ > "$MM_LOCK" ) 2>/dev/null; then
     ( set -C; echo $$ > "$MM_LOCK" ) 2>/dev/null || exit 0
 fi
 echo $$ > "$MM_PIDF"
-_sweep_self
-trap 'rm -f "$MM_LOCK"' EXIT
 # 启动即清扫同名的其它实例（历史版本没有锁，可能残留多个）
+# 注意：函数必须先定义后调用 —— 原实现把 _sweep_self 定义写在调用之后，
+# mksh 每次启动都会打一行 "_sweep_self: not found"，清扫其实从未执行过。
 _sweep_self() {
     for _p in /proc/[0-9]*; do
         _pid=${_p#/proc/}
@@ -64,6 +64,8 @@ _sweep_self() {
         echo "$_c" | grep -q 'ModuleMOD\.sh' && kill -9 "$_pid" 2>/dev/null
     done
 }
+_sweep_self
+trap 'rm -f "$MM_LOCK"' EXIT
 _keep_alive() {
     _d=$(_daemon_pid)
     if [ -z "$_d" ]; then
