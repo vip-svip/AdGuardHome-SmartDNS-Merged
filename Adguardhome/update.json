@@ -1,6 +1,6 @@
 {
-  "version": "20261125",
-  "versionCode": 20261125,
-  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/20261125/AdguardHome-SmartDNS-Merged-20261125.zip",
-  "changelog": "[20261125] 隐私防线扩展：3 个独立隐私过滤器（应用隐私 112 / 运营商追踪 54 / 反诈上报 24，可单独停用）；内置腾讯广告规则 23 条（广点通/优联/广告素材 CDN/SDK 上报，OPPO 实测）；色情网站 107 条、水印 118 条；SNI 拦截 11 端口 + QUIC DROP；SNI 链并发锁；零计数自愈；根治挂机（关闭 querylog 文件日志 + 守护 oom_score_adj=-1000）；模块简介只保留登录地址与密码"
+  "version": "20261127",
+  "versionCode": 20261127,
+  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261127/AdGuardHome-SmartDNS-Merged-20261127.zip",
+  "changelog": "[20261127] 自愈修复：AdGuardHome 被杀后 2 秒拉起（原 35 秒不重启，DNS 全断）——存活判断不再用 pgrep -f 路径子串、排除 Z 僵尸、守护单例 pidfile、启动锁等待 12s→5s、主循环外加 2 秒轻量看门狗；DNS 端口不再漂移：AGH 占端口改 yaml 时按 config.prop 回写、两份 config.prop 强制同步；aghmitm 5 秒热加载只在规则/脚本内容变化时打日志（mitm.log 12 秒 24 行→2 行）；webui privacy 页 embed 内联首帧、脚本页空态文案、v6 隐私链 printf 修复；自检 full_check 113 项全绿"
 }

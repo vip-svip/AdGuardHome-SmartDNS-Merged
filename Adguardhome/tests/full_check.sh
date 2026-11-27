@@ -145,8 +145,25 @@ J=$(iptables -t nat -S OUTPUT 2>/dev/null | _gr -c -E -- '-j ADGUARDB?$')
 iptables -t nat -S "$VC" 2>/dev/null | _gr -q -- '-p udp -m udp --dport 53 -j REDIRECT' && ok "$VC 劫持 udp/53" || bad "$VC 未劫持 udp/53"
 iptables -t nat -S "$VC" 2>/dev/null | _gr -q -- '-p tcp -m tcp --dport 53 -j REDIRECT' && ok "$VC 劫持 tcp/53" || bad "$VC 未劫持 tcp/53"
 iptables -t nat -S "$VC" 2>/dev/null | _gr -q -- "-A $VC -o lo -j RETURN" && ok "$VC 放行 lo（防环路）" || bad "$VC 缺 lo 放行"
-SQL=$(curl -s -m 5 -u root:root 'http://127.0.0.1:40251/control/querylog?limit=200' 2>/dev/null | _gr -o '"question"' | wc -l | tr -d ' ')
-[ "${SQL:-0}" -ge 1 ] && ok "AGH querylog 有 ${SQL} 条查询（说明真有流量进来）" || bad "AGH querylog 为空（劫持可能没生效）"
+# querylog 会被 AGH 重启清空、也会按大小轮转，读到空不代表劫持没生效：
+# 先真发一次查询（走系统解析 → 被 nat 劫进 AGH）再读，最多试 3 轮。
+SQL=0
+for _qtry in 1 2 3; do
+    curl -s -o /dev/null -m 6 'http://www.baidu.com' 2>/dev/null
+    sleep 1
+    SQL=$(curl -s -m 5 -u root:root 'http://127.0.0.1:40251/control/querylog?limit=200' 2>/dev/null | _gr -o '"question"' | wc -l | tr -d ' ')
+    [ "${SQL:-0}" -gt 0 ] && break
+    sleep 2
+done
+if [ "${SQL:-0}" -gt 0 ]; then
+    ok "AGH querylog 有 ${SQL} 条记录（劫持生效）"
+else
+    # querylog 为空**不是**故障判据，只做提示：系统 DNS 缓存命中（dnsproxyd 会自己缓存）、
+    # proxy 模式下 vpn_apps 豁免、代理 App 接管系统解析，都会让 AGH 一条都不记。
+    # 拦截到底生效没有，看前面「拦截域名解析成 NXDOMAIN + FilteredBlackList」的铁证。
+    note "querylog 为空（缓存命中/代理接管都常见，非故障）；拦截是否生效看上面的 NXDOMAIN 铁证"
+fi
+[ "${SQL:-0}" -ge 1 ] && ok "AGH querylog 有 ${SQL} 条查询（说明真有流量进来）" || note "querylog 为空：同上，缓存/代理接管导致，非故障"
 RESV=$(prop vpn_compat)
 note "vpn_compat=$RESV"
 case "$RESV" in
@@ -164,8 +181,17 @@ if [ "$PLO" = "1" ]; then
     for p in 40251 6080 6081; do
         iptables -S AGH_WEBUI 2>/dev/null | _gr -q -- "--dport $p -j DROP" && ok "面板端口 $p 对外 DROP" || bad "面板端口 $p 未 DROP"
     done
-    LN=$(iptables -S AGH_WEBUI 2>/dev/null | _gr -n -- '--dport 40251 -j DROP' | cut -d: -f1 | head -1)
-    LR=$(iptables -S AGH_WEBUI 2>/dev/null | _gr -n -- '-s 192.168' | cut -d: -f1 | head -1)
+    # 顺序判断必须用「同一次 iptables 快照」：守护会在开机窗口里 A/B 换链，
+    # 分两次调用取样，中间链被重建就把第二条取成空 → 假 FAIL（PJD110 上实测踩到）。
+    SUI=$(iptables -S AGH_WEBUI 2>/dev/null)
+    LN=$(printf '%s\n' "$SUI" | _gr -n -- '--dport 40251 -j DROP' | cut -d: -f1 | head -1)
+    LR=$(printf '%s\n' "$SUI" | _gr -n -- '-s 192.168' | cut -d: -f1 | head -1)
+    if [ -z "$LN" ] || [ -z "$LR" ]; then
+        sleep 1
+        SUI=$(iptables -S AGH_WEBUI 2>/dev/null)
+        LN=${LN:-$(printf '%s\n' "$SUI" | _gr -n -- '--dport 40251 -j DROP' | cut -d: -f1 | head -1)}
+        LR=${LR:-$(printf '%s\n' "$SUI" | _gr -n -- '-s 192.168' | cut -d: -f1 | head -1)}
+    fi
     if [ -n "$LN" ] && [ -n "$LR" ] && [ "$LR" -lt "$LN" ]; then ok "局域网放行在 DROP 之前（顺序正确）"; else bad "局域网放行顺序错误（LAN=$LR DROP=$LN）"; fi
 else
     note "panel_lan_only=$PLO，跳过"
@@ -223,8 +249,23 @@ FS=$(curl -s -m 6 -u root:root 'http://127.0.0.1:40251/control/filtering/status'
 REG=$(printf '%s' "$FS" | _gr -o '"url":"[^"]*"' | sed 's/"url":"//; s/"//')
 for f in "$MODDIR"/rules/*.txt; do
     [ -f "$f" ] || continue
-    case "$f" in *脚本拦截.txt) continue ;; esac
-    printf '%s\n' "$REG" | _gr -qx "$f" && ok "过滤器已注册：$(basename "$f")" || bad "过滤器未注册：$(basename "$f")（文件在但 AGH 不读）"
+    b=$(basename "$f")
+    case "$b" in 脚本拦截.txt) continue ;; esac
+    if printf '%s\n' "$REG" | _gr -qx "$f"; then
+        ok "过滤器已注册：$b"
+    else
+        # 只有模块自带的规则没注册才算故障。rules 目录是「用户可见可编辑」的，
+        # 从旧版本升上来会留着上一版/用户自己放的规则文件，AGH 不读它们并不影响
+        # 拦截效果（内置清单都在下面这张表里），所以只提示不判失败。
+        case "$b" in
+            拦截列表.txt|反诈和广告.txt|反诈.txt|反诈类.txt|反诈上报.txt|adaway_hosts.txt|\
+            antiadblockfilters.txt|NoAppDownload.txt|应用隐私.txt|运营商追踪.txt|\
+            腾讯广告.txt|色情网站.txt|水印.txt|基站WiFi隐私.txt|myallow.txt)
+                bad "过滤器未注册：$b（模块自带规则，文件在但 AGH 不读）" ;;
+            *)
+                note "未注册（非模块自带，多为旧版本/自定义残留，可手动启停）：$b" ;;
+        esac
+    fi
 done
 printf '%s\n' "$REG" | _gr -qx "$MODDIR/hosts/hosts" && ok "本地 hosts 已注册" || bad "本地 hosts 未注册"
 [ -s "$MODDIR/rules/脚本拦截.txt" ] && ok "脚本拦截.txt 非空（$(wc -l < "$MODDIR/rules/脚本拦截.txt" | tr -d ' ') 行）" || bad "脚本拦截.txt 缺失或为空"
