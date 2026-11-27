@@ -1,7 +1,0 @@
-id=AdGuardHome
-name=AdGuard Home For Android
-version=20261124
-versionCode=20261124
-updateJson=https://raw.githubusercontent.com/vip-svip/AdGuardHome-SmartDNS-Merged/main/update.json
-author=vip-svip
-description=AdGuard Home + SmartDNS + 加密上游桥（DoH/DoT/DoQ/DNSCrypt）一条链的去广告模块。三层拦截默认生效：DNS 过滤 + HTTP Host 头 + TLS SNI（QUIC 强制回落），共用同一份过滤列表，命中即断流，AGH 挂掉自动放行不断网。VPN 应用自动豁免（BoxProxy 共存）。上游管理直接做进 AGH 面板侧栏。开机不卡、IPv6 自适应、冷启动约 1 分钟。端口：AGH 40251 · SmartDNS 6080 · 上游管理 6081。

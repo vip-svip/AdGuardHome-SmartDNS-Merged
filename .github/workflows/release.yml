@@ -14,6 +14,12 @@ on:
 permissions:
   contents: write
 
+env:
+  # 唯一的构建树。历史上 module/ 与 Adguardhome/ 两棵树并存，CI 打包的是旧的
+  # module/，导致 Release 缺 privacy/scripts 页面、vpn_dns_sync、sni_filter 等
+  # 已经开发完成的功能。现在统一到 Adguardhome/。
+  MODULE_DIR: Adguardhome
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -26,17 +32,24 @@ jobs:
       - name: 读取版本号
         id: ver
         run: |
+          set -e
           if [ -n "${{ github.event.inputs.tag }}" ]; then
             TAG="${{ github.event.inputs.tag }}"
           elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             TAG="${GITHUB_REF#refs/tags/}"
           else
-            V=$(grep -m1 '^version=' module/module.prop | cut -d= -f2)
+            V=$(grep -m1 '^version=' "$MODULE_DIR/module.prop" | cut -d= -f2)
             TAG="v${V}"
           fi
-          VERSION=$(grep -m1 '^version=' module/module.prop | cut -d= -f2)
-          VC=$(grep -m1 '^versionCode=' module/module.prop | cut -d= -f2)
-          AUTHOR=$(grep -m1 '^author=' module/module.prop | cut -d= -f2-)
+          VERSION=$(grep -m1 '^version=' "$MODULE_DIR/module.prop" | cut -d= -f2)
+          VC=$(grep -m1 '^versionCode=' "$MODULE_DIR/module.prop" | cut -d= -f2)
+          AUTHOR=$(grep -m1 '^author=' "$MODULE_DIR/module.prop" | cut -d= -f2-)
+          # versionCode 必须是纯数字且与 version 一致（本仓库约定两者同为 YYYYMMDD），
+          # 否则模块管理器的「检查更新」会判断错版本高低。
+          case "$VC" in ''|*[!0-9]*) echo "versionCode 必须是整数：$VC"; exit 1 ;; esac
+          if [ "$VERSION" != "$VC" ]; then
+            echo "version=$VERSION 与 versionCode=$VC 不一致"; exit 1
+          fi
           echo "tag=$TAG"             >> "$GITHUB_OUTPUT"
           echo "version=$VERSION"     >> "$GITHUB_OUTPUT"
           echo "versionCode=$VC"      >> "$GITHUB_OUTPUT"
@@ -46,30 +59,41 @@ jobs:
       - name: 校验模块文件
         run: |
           set -e
-          for f in module/module.prop module/service.sh module/customize.sh module/uninstall.sh \
-                   module/bin/AdGuardHome module/bin/dnsenc; do
+          for f in "$MODULE_DIR/module.prop" "$MODULE_DIR/service.sh" "$MODULE_DIR/customize.sh" \
+                   "$MODULE_DIR/uninstall.sh" "$MODULE_DIR/bin/AdGuardHome" "$MODULE_DIR/bin/dnsenc"; do
             if [ ! -e "$f" ]; then echo "缺少 $f"; exit 1; fi
           done
+          # 二进制必须是 ELF（防止误提交空文件），架构只告警不阻断
+          for b in "$MODULE_DIR/bin/AdGuardHome" "$MODULE_DIR/bin/dnsenc"; do
+            head -c 4 "$b" | grep -q 'ELF' || { echo "$b 不是 ELF"; exit 1; }
+            if ! file "$b" | grep -q 'ARM aarch64'; then
+              echo "WARN: $b 不是 aarch64：$(file "$b")"
+            fi
+          done
           echo "--- module.prop ---"
-          cat module/module.prop
+          cat "$MODULE_DIR/module.prop"
           echo "--- 脚本语法检查 ---"
-          for f in module/service.sh module/customize.sh module/uninstall.sh module/action.sh \
-                   module/scripts/*.sh module/scripts/webui/cgi-bin/upstream; do
+          for f in "$MODULE_DIR"/*.sh "$MODULE_DIR"/scripts/*.sh; do
             [ -f "$f" ] || continue
             sh -n "$f" && echo "  OK   $f"
           done
+
+      - name: ShellCheck（error 级阻断）
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          find "$MODULE_DIR" -name '*.sh' -print0 | xargs -0 shellcheck -S error -e SC1090,SC1091
 
       - name: 打包
         id: pack
         run: |
           set -e
           NAME="AdGuardHome-SmartDNS-Merged-${{ steps.ver.outputs.version }}.zip"
-          cd module
-          # -X 去掉多余属性；排除运行期垃圾
+          cd "$MODULE_DIR"
+          # -X 去掉多余属性；排除源码、运行期垃圾与历史构建变体
           zip -r -X "../$NAME" . \
-            -x '*/.DS_Store' '*/Thumbs.db' 'bin/data/*' 'rules/subscriptions/*' \
-               'smartdns/tmp/*' 'smartdns/var/*' 'smartdns/run/*' 'smartdns/proc/*' \
-               'smartdns/sys/*' 'smartdns/dev/*' '*.log'
+            -x 'tools/*' 'docs/*' 'bin/data/*' 'bin/*.log' 'bin/AdGuardHome-t*' \
+               'rules/subscriptions/*' 'smartdns/tmp/*' 'smartdns/var/*' 'smartdns/run/*' \
+               'smartdns/proc/*' 'smartdns/sys/*' 'smartdns/dev/*' '*.log' '.DS_Store'
           cd ..
           SIZE=$(stat -c%s "$NAME")
           MD5=$(md5sum "$NAME" | cut -d' ' -f1)
@@ -77,7 +101,7 @@ jobs:
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "size=$SIZE" >> "$GITHUB_OUTPUT"
           echo "md5=$MD5"   >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA"   >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"    >> "$GITHUB_OUTPUT"
           echo "打包完成: $NAME  ${SIZE}B  md5=${MD5}"
 
       - name: 发布 Release
@@ -100,7 +124,7 @@ jobs:
             1. 下载 `${{ steps.pack.outputs.name }}`
             2. 在 KernelSU / Magisk 里刷入，或解开到 `/data/adb/modules/AdGuardHome`
             3. 重启设备
-            4. 端口：AdGuard Home 面板 `40251` · SmartDNS 面板 `6080` · 上游管理 `6081`（仅 `127.0.0.1`）
+            4. 端口：AdGuard Home 面板 `40251` · SmartDNS 面板 `6080` · 上游管理 `6081`
 
             ### 校验
 
@@ -113,3 +137,26 @@ jobs:
             ### 本版变更
 
             见提交记录：`git log --oneline $(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo HEAD~1)..HEAD`
+
+      - name: 回写 update.json
+        run: |
+          set -e
+          REPO="${{ github.repository }}"
+          TAG="${{ steps.ver.outputs.tag }}"
+          VERSION_CODE="${{ steps.ver.outputs.versionCode }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          ZIP_NAME="${{ steps.pack.outputs.name }}"
+          cat > update.json <<EOF
+          {
+            "versionCode": $VERSION_CODE,
+            "version": "$VERSION",
+            "zipUrl": "https://github.com/${REPO}/releases/download/${TAG}/${ZIP_NAME}",
+            "changelog": "https://raw.githubusercontent.com/${REPO}/main/changelog.md"
+          }
+          EOF
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: update.json -> $VERSION"
+          git push origin "HEAD:main"

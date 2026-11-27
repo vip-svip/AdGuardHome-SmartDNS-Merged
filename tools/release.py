@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-一键发版：打包 module/ → 建 tag → 建/更新 Release → 上传 zip。
+一键发版：打包 Adguardhome/ → 建 tag → 建/更新 Release → 上传 zip。
 
 用法:
     python tools/release.py                 # 用 module.prop 里的 version 作为 tag
@@ -18,6 +18,7 @@ Token（按顺序找）:
 依赖: git（需在仓库里）、zip、curl 或 urllib（脚本用标准库 urllib，不依赖 curl）
 """
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -35,10 +36,11 @@ except Exception:
     pass
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODULE_DIR = os.path.join(ROOT, "module")
+# 唯一的构建树（历史上有 module/ 与 Adguardhome/ 两棵树，见 README）
+MODULE_DIR = os.path.join(ROOT, "Adguardhome")
 PROP = os.path.join(MODULE_DIR, "module.prop")
 
-# 不进 zip 的运行期垃圾
+# 不进 zip 的运行期垃圾 / 源码 / 历史构建变体
 EXCLUDE_PREFIXES = (
     "bin/data/",
     "rules/subscriptions/",
@@ -48,8 +50,11 @@ EXCLUDE_PREFIXES = (
     "smartdns/proc/",
     "smartdns/sys/",
     "smartdns/dev/",
+    "tools/",
+    "docs/",
 )
 EXCLUDE_SUFFIXES = (".log", ".DS_Store", "Thumbs.db")
+EXCLUDE_GLOBS = ("bin/AdGuardHome-t*",)
 
 
 # ---------------------------------------------------------------- 基础
@@ -145,7 +150,8 @@ def build_zip(out_path):
                 rel_dir = ""
             for n in sorted(names):
                 rel = (rel_dir + "/" + n) if rel_dir else n
-                if any(rel.startswith(p) for p in EXCLUDE_PREFIXES) or rel.endswith(EXCLUDE_SUFFIXES):
+                if any(rel.startswith(p) for p in EXCLUDE_PREFIXES) or rel.endswith(EXCLUDE_SUFFIXES) \
+                        or any(fnmatch.fnmatch(rel, g) for g in EXCLUDE_GLOBS):
                     skipped += 1
                     continue
                 full = os.path.join(root, n)
@@ -202,7 +208,7 @@ def main():
     print("产物   :", zip_name)
 
     if a.dry_run:
-        print("\n[dry-run] 会打包 module/ → 建 tag %s → 建/更新 Release → 上传 %s" % (tag, zip_name))
+        print("\n[dry-run] 会打包 Adguardhome/ → 建 tag %s → 建/更新 Release → 上传 %s" % (tag, zip_name))
         return
 
     owner, repo = detect_repo()
