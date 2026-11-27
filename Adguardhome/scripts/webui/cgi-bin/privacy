@@ -14,17 +14,23 @@ cors() {
 }
 
 load_conf() {
-    DNS=1; VPN=1; IP=1; SB=0; PAR=0
+    DNS=1; VPN=1; IP=1; SB=0; PAR=0; NTP=1; DHCP=1; SMB=1; TCP=1; SNMP=1
     [ -f "$CONF" ] || return 0
     DNS=$(sed -n 's/^dns=//p' "$CONF" 2>/dev/null | head -1); [ -n "$DNS" ] || DNS=1
     VPN=$(sed -n 's/^vpn=//p' "$CONF" 2>/dev/null | head -1); [ -n "$VPN" ] || VPN=1
     IP=$(sed -n 's/^ip=//p'  "$CONF" 2>/dev/null | head -1); [ -n "$IP" ]  || IP=1
     SB=$(sed -n 's/^sb=//p'  "$CONF" 2>/dev/null | head -1); [ -n "$SB" ]  || SB=0
     PAR=$(sed -n 's/^par=//p' "$CONF" 2>/dev/null | head -1); [ -n "$PAR" ] || PAR=0
+    NTP=$(sed -n 's/^ntp=//p' "$CONF" 2>/dev/null | head -1); [ -n "$NTP" ] || NTP=1
+    DHCP=$(sed -n 's/^dhcp=//p' "$CONF" 2>/dev/null | head -1); [ -n "$DHCP" ] || DHCP=1
+    SMB=$(sed -n 's/^smb=//p' "$CONF" 2>/dev/null | head -1); [ -n "$SMB" ] || SMB=1
+    TCP=$(sed -n 's/^tcp=//p' "$CONF" 2>/dev/null | head -1); [ -n "$TCP" ] || TCP=1
+    SNMP=$(sed -n 's/^snmp=//p' "$CONF" 2>/dev/null | head -1); [ -n "$SNMP" ] || SNMP=1
 }
 
 save_conf() {
-    printf 'dns=%s\nvpn=%s\nip=%s\nsb=%s\npar=%s\n' "$DNS" "$VPN" "$IP" "$SB" "$PAR" > "$CONF" 2>/dev/null
+    printf 'dns=%s\nvpn=%s\nip=%s\nsb=%s\npar=%s\nntp=%s\ndhcp=%s\nsmb=%s\ntcp=%s\nsnmp=%s\n' \
+        "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP" > "$CONF" 2>/dev/null
 }
 
 # AGH 面板 API：POST /control/safebrowsing|parental/enable|disable（basic auth）
@@ -91,6 +97,41 @@ apply() {
         ipt6 -A $CHAIN -p udp --dport 3544 -j DROP
         ipt -A $CHAIN -p 41 -j DROP
     fi
+    # 防 NTP 时钟指纹：出网 NTP 一律丢（时钟指纹可跨网络关联设备）；本机时间由系统维护
+    if [ "$NTP" = "1" ]; then
+        ipt -A $CHAIN -p udp --dport 123 -j DROP
+        ipt6 -A $CHAIN -p udp --dport 123 -j DROP
+    fi
+    # 防 DHCP 探测泄露：出网 DHCP 请求丢弃（防恶意热点 DHCP 指纹识别设备）
+    if [ "$DHCP" = "1" ]; then
+        ipt -A $CHAIN -p udp --dport 67 -j DROP
+        ipt6 -A $CHAIN -p udp --dport 67 -j DROP
+    fi
+    # 防局域网探测泄露：NetBIOS/SMB 出网丢弃（防扫描器读设备名/共享）
+    if [ "$SMB" = "1" ]; then
+        for p in 137 139 445; do
+            ipt -A $CHAIN -p udp --dport $p -j DROP
+            ipt -A $CHAIN -p tcp --dport $p -j DROP
+            ipt6 -A $CHAIN -p udp --dport $p -j DROP
+            ipt6 -A $CHAIN -p tcp --dport $p -j DROP
+        done
+    fi
+    # 防明文协议回退泄露：Telnet/SMTP/POP3/IMAP 明文端口出网丢弃（防 App 明文外传）
+    if [ "$TCP" = "1" ]; then
+        for p in 23 25 110 143; do
+            ipt -A $CHAIN -p tcp --dport $p -j DROP
+            ipt6 -A $CHAIN -p tcp --dport $p -j DROP
+        done
+    fi
+    # 防 SNMP 信息泄露：出网 SNMP 查询/陷阱丢弃（防设备信息被读）
+    if [ "$SNMP" = "1" ]; then
+        for p in 161 162; do
+            ipt -A $CHAIN -p udp --dport $p -j DROP
+            ipt -A $CHAIN -p tcp --dport $p -j DROP
+            ipt6 -A $CHAIN -p udp --dport $p -j DROP
+            ipt6 -A $CHAIN -p tcp --dport $p -j DROP
+        done
+    fi
     # 挂到 OUTPUT（幂等）
     ipt -C OUTPUT -j $CHAIN || ipt -I OUTPUT 1 -j $CHAIN
     ipt6 -C OUTPUT -j $CHAIN 2>/dev/null || ipt6 -I OUTPUT 1 -j $CHAIN 2>/dev/null
@@ -123,21 +164,34 @@ case "$REQUEST_METHOD" in
         case "$body" in *ip=*)  IP=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^ip=//p'  | head -1);; esac
         case "$body" in *sb=*)  SB=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^sb=//p'  | head -1);; esac
         case "$body" in *par=*) PAR=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^par=//p' | head -1);; esac
+        case "$body" in *ntp=*) NTP=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^ntp=//p' | head -1);; esac
+        case "$body" in *dhcp=*) DHCP=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^dhcp=//p' | head -1);; esac
+        case "$body" in *smb=*) SMB=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^smb=//p' | head -1);; esac
+        case "$body" in *tcp=*) TCP=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^tcp=//p' | head -1);; esac
+        case "$body" in *snmp=*) SNMP=$(printf '%s' "$body" | tr '&' '\n' | sed -n 's/^snmp=//p' | head -1);; esac
         case "$DNS" in 0|1) ;; *) DNS=1 ;; esac
         case "$VPN" in 0|1) ;; *) VPN=1 ;; esac
         case "$IP"  in 0|1) ;; *) IP=1  ;; esac
         case "$SB"  in 0|1) ;; *) SB=0  ;; esac
         case "$PAR" in 0|1) ;; *) PAR=0 ;; esac
+        case "$NTP" in 0|1) ;; *) NTP=1 ;; esac
+        case "$DHCP" in 0|1) ;; *) DHCP=1 ;; esac
+        case "$SMB" in 0|1) ;; *) SMB=1 ;; esac
+        case "$TCP" in 0|1) ;; *) TCP=1 ;; esac
+        case "$SNMP" in 0|1) ;; *) SNMP=1 ;; esac
         # SB/Parental 开启前预检上游可达性（不可达强开会导致 AGH 全部查询阻塞→整机断网）
         SB_BLOCKED=0; PAR_BLOCKED=0
         if [ "$SB" = "1" ] && ! sb_upstream_ok; then SB=0; SB_BLOCKED=1; fi
         if [ "$PAR" = "1" ] && ! sb_upstream_ok; then PAR=0; PAR_BLOCKED=1; fi
         save_conf
+        # 网络层规则即时重建（dns/vpn/ip/ntp/dhcp/smb/tcp/snmp 全部落地）
+        apply
         # SB/Parental 走 AGH 原生 API（引擎在 fork 里，开了就是系统级）
         [ "$SB" = "1" ] && agh_set safebrowsing enable || agh_set safebrowsing disable
         [ "$PAR" = "1" ] && agh_set parental enable || agh_set parental disable
         cors
-        printf '{"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"sb_blocked":%s,"par_blocked":%s,"applied":1}\n' "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$SB_BLOCKED" "$PAR_BLOCKED"
+        printf '{"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"sb_blocked":%s,"par_blocked":%s,"applied":1}\n' \
+            "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP" "$SB_BLOCKED" "$PAR_BLOCKED"
         ;;
     *)
         load_conf
@@ -146,6 +200,7 @@ case "$REQUEST_METHOD" in
         SB=$(agh_status safebrowsing)
         PAR=$(agh_status parental)
         cors
-        printf '{"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"applied":1}\n' "$DNS" "$VPN" "$IP" "$SB" "$PAR"
+        printf '{"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":1}\n' \
+            "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP"
         ;;
 esac

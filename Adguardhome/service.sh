@@ -959,7 +959,7 @@ fi
 fi
 _privacy_cgi="$SCRIPT_DIR/webui/cgi-bin/privacy"
 if [ -f "$_privacy_cgi" ]; then
-    [ -f "$AGH_DIR/privacy.conf" ] || printf 'dns=1\nvpn=1\nip=1\nsb=0\npar=0\n' > "$AGH_DIR/privacy.conf" 2>/dev/null
+    [ -f "$AGH_DIR/privacy.conf" ] || printf 'dns=1\nvpn=1\nip=1\nsb=0\npar=0\nntp=1\ndhcp=1\nsmb=1\ntcp=1\nsnmp=1\n' > "$AGH_DIR/privacy.conf" 2>/dev/null
     sh "$_privacy_cgi" --apply >/dev/null 2>&1 &
 fi
 # 过滤器缓存为空时自动重新下载（全新安装 / 跨版本升级后必备，否则没有拦截效果）
