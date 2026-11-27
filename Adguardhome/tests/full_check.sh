@@ -140,7 +140,15 @@ netstat -uln 2>/dev/null | _gr -q ":$RP " && ok "AGH 实际监听 udp/$RP" || ba
 VC=$(iptables -t nat -S OUTPUT 2>/dev/null | _awk '/-j ADGUARD(B)?$/{for(i=1;i<=NF;i++) if($i=="-j") print $(i+1); exit}')
 VC=${VC:-ADGUARD}
 note "当前生效劫持链：$VC"
-iptables -t nat -S "$VC" 2>/dev/null | _gr -q -- "--to-ports ${RP}" && ok "$VC 的 REDIRECT 目标= $RP" || bad "$VC 的 REDIRECT 目标不是 $RP（DNS 会打到空端口）"
+# 链是 A/B 轮换的，重建窗口里可能正好查不到 --to-ports（不是真打空端口）→ 重试 3 次
+_redir_ok=0
+for _rt in 1 2 3; do
+    VC=$(iptables -t nat -S OUTPUT 2>/dev/null | _awk '/-j ADGUARD(B)?$/{for(i=1;i<=NF;i++) if($i=="-j") print $(i+1); exit}')
+    VC=${VC:-ADGUARD}
+    iptables -t nat -S "$VC" 2>/dev/null | _gr -q -- "--to-ports ${RP}" && { _redir_ok=1; break; }
+    sleep 1
+done
+[ "$_redir_ok" = "1" ] && ok "$VC 的 REDIRECT 目标= $RP" || bad "$VC 的 REDIRECT 目标不是 $RP（DNS 会打到空端口）"
 
 hdr "3. DNS 劫持链路"
 J=$(iptables -t nat -S OUTPUT 2>/dev/null | _gr -c -E -- '-j ADGUARDB?$')
@@ -368,6 +376,28 @@ if [ -n "$_inl_json" ] && [ "$_inl_json" = "$_get_json" ]; then
 else
     bad "静态内联值与 GET 真值不一致：$_inl_json vs $_get_json"
 fi
+
+# 12.0b 页面必须走 CGI（静态文件在 busybox httpd 下加不了 Cache-Control，浏览器会吃旧副本）
+_hdr=$(curl -s -m 5 -D - -o /dev/null "http://$HOST:6081/cgi-bin/privacy-page" 2>/dev/null)
+case "$_hdr" in
+  *"no-store"*) ok "privacy-page 带 Cache-Control: no-store（浏览器不会拿旧页面）" ;;
+  *) bad "privacy-page 没带 no-store 头（浏览器可能一直用旧副本）" ;;
+esac
+case "$_hdr" in
+  *"text/html"*) ok "privacy-page Content-Type 是 text/html" ;;
+  *) bad "privacy-page Content-Type 不对" ;;
+esac
+_pg=$(curl -s -m 5 "http://$HOST:6081/cgi-bin/privacy-page" 2>/dev/null)
+case "$_pg" in
+  *"window.__AGH_PRIV={"*) ok "privacy-page 输出内联真值" ;;
+  *) bad "privacy-page 输出缺内联真值（首屏会等 GET）" ;;
+esac
+_pg_j=$(printf '%s' "$_pg" | _gr -c 'SHELL_JUMP|privacy-page')
+[ "${_pg_j:-0}" -eq 0 ] && ok "privacy-page 输出已剥掉跳转壳（不会自己跳自己）" \
+                         || bad "privacy-page 输出里还有跳转壳（会无限跳转）"
+_shell=$(curl -s -m 5 "http://$HOST:6081/privacy.html" 2>/dev/null | _gr -c '/cgi-bin/privacy-page')
+[ "${_shell:-0}" -ge 1 ] && ok "直连 privacy.html 会立刻跳到 CGI 版（$_shell 处）" \
+                         || bad "privacy.html 缺跳转壳（直连静态仍会吃缓存）"
 
 # 12.1 真实 DNS 解析：手搓 27 字节 A 查询（八进制转义，mksh/busybox printf 都认）
 _q=/data/local/tmp/.fc_q.bin

@@ -2,6 +2,13 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<!--SHELL_JUMP-->
+<!-- 静态访问（/privacy.html）时立刻跳到 CGI 版：只有 CGI 能带 no-store 头。
+     busybox httpd 给静态文件加不了 Cache-Control，浏览器就可能一直用旧副本，
+     表现就是「明明改好了，他刷新还是旧页面、还是会翻」。CGI 版由 awk 剥掉这一段。 -->
+<meta http-equiv="refresh" content="0;url=/cgi-bin/privacy-page">
+<script>location.replace('/cgi-bin/privacy-page');</script>
+<!--/SHELL_JUMP-->
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>高级设置 · 隐私防护</title>
 <style>

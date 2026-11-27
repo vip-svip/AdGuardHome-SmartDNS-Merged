@@ -340,7 +340,7 @@ fi
 chmod 755 "$SCRIPT_DIR/webui/cgi-bin"/* 2>/dev/null
 chmod 644 "$SCRIPT_DIR/webui"/*.html 2>/dev/null
 # 校验关键 CGI 是否齐全，缺一个就明确记日志（装机时能在 magisk 安装日志里看到）
-for _c in privacy certs scripts mitm apps upstream; do
+for _c in privacy privacy-page certs scripts mitm apps upstream; do
     if [ ! -f "$SCRIPT_DIR/webui/cgi-bin/$_c" ]; then
         ui_print "- WARN: CGI missing after install: $_c"
     fi
