@@ -427,7 +427,7 @@ case "$_root" in
   *) bad "6081 根入口不是隐私页（/ 没返回跳转）" ;;
 esac
 case "$_pg" in
-  *2026112802*) ok "privacy-page 构建号 2026112802（可自证是新版）" ;;
+  *20261129*) ok "privacy-page 构建号 20261129（可自证是新版）" ;;
   *) bad "privacy-page 缺新构建号（无法判断浏览器吃的是哪版）" ;;
 esac
 
