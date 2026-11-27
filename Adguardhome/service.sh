@@ -962,6 +962,14 @@ if [ -f "$_privacy_cgi" ]; then
     [ -f "$AGH_DIR/privacy.conf" ] || printf 'dns=1\nvpn=1\nip=1\nsb=0\npar=0\nntp=1\ndhcp=1\nsmb=1\ntcp=1\nsnmp=1\n' > "$AGH_DIR/privacy.conf" 2>/dev/null
     sh "$_privacy_cgi" --apply >/dev/null 2>&1 &
 fi
+# VPN DNS 共存：把 AGH 端口注入常见 VPN / 内核代理的 nameserver，
+# 让 VPN 开着时应用解析仍走 AGH（否则 fake-ip 会完全接管 DNS，过滤失效）
+_vpn_dns="$SCRIPT_DIR/vpn_dns_sync.sh"
+if [ -f "$_vpn_dns" ]; then
+    if ! pgrep -f "$_vpn_dns" >/dev/null 2>&1; then
+        setsid sh "$_vpn_dns" >>"$AGH_DIR/vpn_dns.log" 2>&1 &
+    fi
+fi
 # 过滤器缓存为空时自动重新下载（全新安装 / 跨版本升级后必备，否则没有拦截效果）
 agh_rules_guard
 
