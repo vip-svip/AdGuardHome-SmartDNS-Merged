@@ -114,9 +114,13 @@ SNI_EOF
 
 PROXY_SCRIPT="$AGH_DIR/scripts/ProxyConfig.sh"
 
-# 升级安装：旧脚本可能带 immutable 标志，必须在解压前解锁，否则 unzip 写入失败
+# 升级安装：旧模块目录里的 immutable 标志必须在解压前清干净。
+# 不只是 *.sh —— 目录也可以是 immutable（chattr +i 到目录上会让整个子树删不动），
+# 而 KernelSU/Magisk 在重启时要把 /data/adb/modules/AdGuardHome 整棵删掉，
+# 一个 I 标志就让更新装不上（真机实证：模块一直停在旧构建）。
 if [ -d "$ADGPATH" ]; then
-    find "$ADGPATH" -type f \( -name "*.sh" -o -name "module.prop" \) -exec chattr -i {} \; 2>/dev/null
+    find "$ADGPATH" -type f -exec chattr -i {} \; 2>/dev/null
+    find "$ADGPATH" -type d -exec chattr -i {} \; 2>/dev/null
 fi
 
 i18n_print "- Extracting basic module files" "- 正在解压模块基本文件"
@@ -358,6 +362,36 @@ if [ -f "$BACKUP_DIR/hosts" ]; then
 fi
 chmod 644 "$MODPATH/hosts/hosts" 2>/dev/null
 
+# ---- 证书目录 ----
+# $MODDIR/certs 同时被三处使用：certs 管理页（cgi-bin/certs）、开机 service.sh 里的
+# certs_install.sh、以及 system/etc/security/cacerts 的 overlay 源头。
+# 旧版 customize.sh 从没把 certs/ 解到 $MODPATH，安装末尾那次 certs_install 调用因为
+# 找不到脚本被静默跳过，重刷后模块目录里没有 certs/ → 系统 CA overlay 丢失、证书页空。
+# 这里补上，并且用「旧目录优先」覆盖：设备上已生成的 CA 一旦被包内模板顶掉，
+# 之前装过这张 CA 的 App/系统信任库就全部失效。
+i18n_print "- Extracting built-in CA / cert store" "- 正在解压内置证书"
+mkdir -p "$MODPATH/certs"
+if [ -d "$ADGPATH/certs" ] && [ ! "$ADGPATH" = "$MODPATH" ]; then
+    cp -rf "$ADGPATH/certs/." "$MODPATH/certs/" 2>/dev/null
+fi
+unzip -oq "$ZIPFILE" "certs/*" -d "$MODPATH" >/dev/null 2>&1
+if [ -d "$ADGPATH/certs" ] && [ ! "$ADGPATH" = "$MODPATH" ]; then
+    cp -rf "$ADGPATH/certs/." "$MODPATH/certs/" 2>/dev/null
+fi
+chmod 644 "$MODPATH"/certs/*.crt 2>/dev/null
+chmod 600 "$MODPATH"/certs/*.key 2>/dev/null
+# 安装阶段的 CA 注入：脚本本体只解到 $AGH_DIR/scripts，$MODPATH/scripts 里没有它，
+# 所以两个位置都试，MODDIR 始终指向正在安装的 $MODPATH。
+_cert_installer=""
+for _ci in "$MODPATH/scripts/certs_install.sh" "$AGH_DIR/scripts/certs_install.sh"; do
+    [ -f "$_ci" ] && { _cert_installer="$_ci"; break; }
+done
+if [ -n "$_cert_installer" ]; then
+    MODDIR="$MODPATH" sh "$_cert_installer" 2>&1 | while read -r _l; do ui_print "$_l"; done
+else
+    ui_print "- WARN: certs_install.sh not found, CA overlay skipped"
+fi
+
 # 升级前备份用户的 SmartDNS 配置（含自加的上游服务器），解压后恢复
 SD_ETC="$AGH_DIR/smartdns/etc/smartdns"
 SD_BAK="$BACKUP_DIR/smartdns"
@@ -498,7 +532,7 @@ fi
 old_line=$(grep -m1 '^PROXY_URL=' "$BACKUP_DIR/config.prop") && \
 [ -n "$old_line" ] && { sed -i "/^PROXY_URL=/d" "$SCRIPT_DIR/config.prop"; printf "%s\n" "$old_line" >> "$SCRIPT_DIR/config.prop"; i18n_print "- Preserved PROXY_URL from backup" "- 已从备份恢复 PROXY_URL"; }
 # VPN 共存选择也要跟着升级保留，否则每次刷入都会被重置回 auto
-for _k in vpn_compat vpn_apps v6_dns agh_user agh_pass sd_user sd_pass; do
+for _k in vpn_compat vpn_apps v6_dns agh_user agh_pass sd_user sd_pass redir_port panel_lan_only; do
     [ -f "$BACKUP_DIR/config.prop" ] || break
     _kv=$(grep -m1 "^[[:space:]]*$_k=" "$BACKUP_DIR/config.prop" 2>/dev/null)
     [ -n "$_kv" ] || continue
@@ -511,9 +545,10 @@ done
 # 只锁不该被就地修改的脚本；service.sh / customize.sh 必须保持可覆盖，
 # 否则升级时 unzip 报 Operation not permitted、模块永远停在旧版安装逻辑。
 find "$ADGPATH" -type f -name "*.sh" -exec chmod 755 {} \; 2>/dev/null
-for _f in action.sh uninstall.sh; do
-    [ -f "$ADGPATH/$_f" ] && chattr +i "$ADGPATH/$_f" 2>/dev/null
-done
+# 模块目录里的文件一律不加 immutable：KernelSU/Magisk 应用更新时要把旧目录整棵
+# rm -rf 再搬 modules_update 进来，只要有一个 +i（含目录上的 I 标志）就删不动，
+# 表现是「包刷进去了、重启后还是旧版」。真机复现：scripts/webui/cgi-bin 带 I 标志，
+# 模块一直停在 11-25 的旧构建。防篡改只锁 $SCRIPT_DIR（不在模块目录里）。
 for _f in "$SCRIPT_DIR"/*.sh; do
     [ -f "$_f" ] && chattr +i "$_f" 2>/dev/null
 done
@@ -533,7 +568,4 @@ for _df in "$AGH_DIR/smartdns/etc/smartdns/domain-rules.conf" \
 done
 i18n_print "- Installation complete. Reboot device." "- 安装完成，请重启设备。"
 
-# ---- 释放内置系统级 CA（HTTPS / MITM）到 systemless overlay ----
-if [ -f "$MODPATH/scripts/certs_install.sh" ]; then
-    MODDIR="$MODPATH" sh "$MODPATH/scripts/certs_install.sh" 2>&1 | while read -r _l; do ui_print "$_l"; done
-fi
+# ---- 系统级 CA（HTTPS / MITM）：注入已在解压 certs/ 后执行过一次，这里不再重复 ----
