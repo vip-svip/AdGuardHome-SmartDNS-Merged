@@ -275,7 +275,12 @@ if [ -n "$found_hosts" ]; then
   log "[WARN] 检测到自带 hosts 的模块:$found_hosts —— 本模块使用 AGH 自带本地 hosts 过滤器，不冲突，继续启动。"
 fi
 
-agh_running() { pgrep -f "$BIN_DIR/AdGuardHome" >/dev/null 2>&1; }
+agh_running() {
+    _ap=$(pidof AdGuardHome 2>/dev/null | awk '{print $1}')
+    [ -n "$_ap" ] || return 1
+    [ "$(awk '{print $3}' "/proc/$_ap/stat" 2>/dev/null)" = "Z" ] && return 1
+    return 0
+}
 smartdns_running() { pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------
@@ -291,6 +296,15 @@ smartdns_running() { pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1
 if ! agh_running; then
     _want=$(sed -n 's/^redir_port=//p' "$SCRIPT_DIR/config.prop" 2>/dev/null | tail -1)
     case "$_want" in ''|*[!0-9]*) _want=5591 ;; esac
+    # 升级/重启瞬间旧 AGH 的 socket 可能还没释放，此时视「端口被占」就会改端口，
+    # 真机上踩到过：5591 被占 → 换成 44781 → 面板/书签/vpn_dns_sync 全对不上。
+    # 所以先等最多 10 秒让残留 socket 消失；只有当 AGH 进程确实不在、端口仍在听
+    # （说明是别的程序占着）才顺延。
+    _wait=0
+    while [ "$_wait" -lt 10 ] && port_listening "$_want" udp && ! pidof AdGuardHome >/dev/null 2>&1; do
+        sleep 1
+        _wait=$((_wait + 1))
+    done
     _r1=""
     _try=0
     _cand=$_want
@@ -308,7 +322,13 @@ if ! agh_running; then
     # http: 段的 address，是死代码，已删除（面板端口以 yaml 原值为准）。
     chattr -i "$SCRIPT_DIR/config.prop" 2>/dev/null
     sed -i "s/^redir_port=.*/redir_port=$_r1/" "$SCRIPT_DIR/config.prop"
-    [ "$_r1" = "$_want" ] || log "[INFO] DNS 端口 $_want 被占用，改用 $_r1（已写回 config.prop）。"
+    # 模块目录那份是升级时的「恢复源」：不同步的话下次升级 customize 会把旧端口
+    # 再恢复回来（运行 44781 / 模块 5591 → 一升级端口跳回，nat 链指错端口 DNS 断）
+    if [ -f "$ADGPATH/scripts/config.prop" ]; then
+        chattr -i "$ADGPATH/scripts/config.prop" 2>/dev/null
+        sed -i "s/^redir_port=.*/redir_port=$_r1/" "$ADGPATH/scripts/config.prop" 2>/dev/null
+    fi
+    [ "$_r1" = "$_want" ] || log "[INFO] DNS 端口 $_want 被占用，改用 $_r1（已写回两处 config.prop）。"
 fi
 
 # ---------------------------------------------------------------
@@ -910,6 +930,24 @@ start_agh_locked() {
     if agh_running; then
         rm -rf "$_aghlk" 2>/dev/null
         return 0
+    fi
+    # yaml 的 dns.port 和 config.prop 的 redir_port 必须同源：
+    # AGH 遇到端口占用会自己换端口并把新端口写回 yaml，写回来的只有 yaml，
+    # config.prop 还留着旧值；nat 链是按 config.prop 建的，两者一旦分叉，
+    # AGH 在新端口上跑、DNS 全打到旧端口 → 解析全断（实测漂到 44781 那回就是这样）。
+    # 以 config.prop 为准回写 yaml（config.prop 才是 iptables 链的真理源）。
+    _prop_port=$(sed -n 's/^redir_port=//p' "$AGH_DIR/scripts/config.prop" 2>/dev/null | tail -1)
+    _yaml_port=$(sed -n '/^dns:/,/^[a-z]/s/^[ \t]*port:[ \t]*\([0-9][0-9]*\).*/\1/p' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null | head -1)
+    if [ -n "$_prop_port" ] && [ "$_prop_port" != "$_yaml_port" ]; then
+        [ "$lang" = "zh" ] && log "yaml dns.port=$_yaml_port 与 config.prop redir_port=$_prop_port 不一致，按 config.prop 回写 yaml。" \
+                           || log "yaml dns.port=$_yaml_port != config.prop redir_port=$_prop_port, rewriting yaml."
+        awk -v P="$_prop_port" '
+            /^dns:/ { f=1; print; next }
+            f && /^[a-z]/ { f=0 }
+            f && /^[ \t]*port:/ { sub(/port:[ \t]*[0-9]+/, "port: " P); f=0 }
+            { print }
+        ' "$BIN_DIR/AdGuardHome.yaml" > "$AGH_DIR/.yaml.tmp" 2>/dev/null \
+            && mv -f "$AGH_DIR/.yaml.tmp" "$BIN_DIR/AdGuardHome.yaml"
     fi
     # 校验yaml，损坏则恢复备份
     if ! "$BIN_DIR/AdGuardHome" --check-config -c "$BIN_DIR/AdGuardHome.yaml" >/dev/null 2>&1; then

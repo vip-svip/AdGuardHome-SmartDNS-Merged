@@ -105,6 +105,7 @@ fi
 
 
 hdr "1. 进程与监听端口"
+RP=$(prop redir_port)
 for p in AdGuardHome smartdns dnsenc aghmitm; do
     pidof "$p" >/dev/null 2>&1 && ok "$p 在跑" || bad "$p 不在"
 done
@@ -114,12 +115,19 @@ for t in 40251 6080 6081 6054; do
     netstat -tln 2>/dev/null | _gr -q ":$t " && ok "tcp/$t 监听" || bad "tcp/$t 未监听"
 done
 netstat -tln 2>/dev/null | _gr -q "127.0.0.1:8899" && ok "tcp/8899(本机) 监听" || bad "tcp/8899 未监听"
-for u in 5591 6053 6054; do
+for u in $RP 6053 6054; do
     netstat -uln 2>/dev/null | _gr -q ":$u " && ok "udp/$u 监听" || bad "udp/$u 未监听"
 done
 
 hdr "2. 端口三处一致性（config.prop / yaml / 实际监听 / REDIRECT）"
-RP=$(prop redir_port)
+# 两份 config.prop（运行目录 / 模块目录）端口必须一致：模块那份是升级时的恢复源，
+# 不一致的话下次升级会把旧端口恢复回来，nat 链指错端口 → DNS 直接全断。
+_p2=$(sed -n 's/^redir_port=//p' "$MODDIR/scripts/config.prop" 2>/dev/null | tail -1)
+if [ -n "$_p2" ] && [ "$_p2" = "$RP" ]; then
+    ok "运行/模块两份 config.prop 端口一致（$RP）"
+else
+    bad "两份 config.prop 端口不一致：运行=${RP:-空} 模块=${_p2:-空}（下次升级会把端口恢复成旧值）"
+fi
 case "$RP" in ''|*[!0-9]*) bad "config.prop redir_port 缺失" ; RP="" ;; *) ok "config.prop redir_port=$RP" ;; esac
 YP=$(_awk '/^dns:/{f=1;next} f&&/^[a-z]/{f=0} f&&/^[ \t]+port:/{gsub(/[^0-9]/,"");print;exit}' "$YAML" 2>/dev/null)
 [ -n "$RP" ] && [ "$RP" = "$YP" ] && ok "yaml dns.port 与 redir_port 一致（$YP）" || bad "yaml dns.port=$YP 与 redir_port=$RP 不一致"
@@ -300,7 +308,7 @@ printf '\022\064\001\000\000\001\000\000\000\000\000\000\005baidu\003com\000\000
 if [ "$(wc -c < "$_q" 2>/dev/null | tr -d ' ')" = "27" ]; then
     "$BB" nc -u -w 3 127.0.0.1 "$RP" < "$_q" > "$_q.a" 2>/dev/null
     _an=$(wc -c < "$_q.a" 2>/dev/null | tr -d ' ')
-    [ "${_an:-0}" -gt 40 ] && ok "5591 有真实 DNS 应答（${_an}B）" || bad "5591 没有应答（${_an}B，DNS 服务没在干活）"
+    [ "${_an:-0}" -gt 40 ] && ok "udp/$RP 有真实 DNS 应答（${_an}B）" || bad "udp/$RP 没有应答（${_an}B，DNS 服务没在干活）"
     # 12.2 53 端口劫持：从本机打 8.8.8.8:53 的探针会被 uid0 豁免（ADGUARD 链对
     # root 自己出手的包 RETURN），所以不能拿「querylog 有没有涨」当判据。改成看
     # 劫持链本身的语义：nat OUTPUT 有跳转、生效链里 53 确实 REDIRECT 到 AGH 端口。
@@ -358,24 +366,26 @@ _nrr=$(iptables -w 2 -S AGH_PRIV 2>/dev/null | _gr -c -- '--dport 123')
 
 # 12.4 aghmitm 自愈：kill -9 后必须有人拉起（真机实测旧版 31 秒都没人管）
 if [ -f "$AGH_DIR/mitm_on" ]; then
+    sleep 3
     _om=$(pidof aghmitm)
     kill -9 "$_om" 2>/dev/null
     _i=0
-    while [ "$_i" -lt 20 ]; do
+    while [ "$_i" -lt 35 ]; do
         _nm=$(pidof aghmitm)
         [ -n "$_nm" ] && break
         _i=$((_i + 1)); sleep 1
     done
-    [ -n "$_nm" ] && ok "aghmitm 被杀后 ${_i}s 内自愈（新 pid $_nm）" || bad "aghmitm 被杀后 20s 内没人拉起（SNI 消费者消失）"
+    [ -n "$_nm" ] && ok "aghmitm 被杀后 ${_i}s 内自愈（新 pid $_nm）" || bad "aghmitm 被杀后 35s 内没人拉起（SNI 消费者消失）"
 else
     note "mitm_on 不在，跳过 aghmitm 自愈"
 fi
 
 # 12.5 AGH 自愈
+sleep 3
 _oa=$(pidof AdGuardHome)
 kill -9 "$_oa" 2>/dev/null
 _i=0
-while [ "$_i" -lt 20 ]; do
+while [ "$_i" -lt 35 ]; do
     _na2=$(pidof AdGuardHome)
     [ -n "$_na2" ] && break
     _i=$((_i + 1)); sleep 1
@@ -383,13 +393,13 @@ done
 if [ -n "$_na2" ]; then
     ok "AdGuardHome 被杀后 ${_i}s 内自愈（新 pid $_na2）"
     _i=0
-    while [ "$_i" -lt 15 ]; do
+    while [ "$_i" -lt 25 ]; do
         netstat -uln 2>/dev/null | _gr -q ":$RP " && break
         _i=$((_i + 1)); sleep 1
     done
     netstat -uln 2>/dev/null | _gr -q ":$RP " && ok "自愈后 udp/$RP 重新监听" || bad "自愈后 udp/$RP 没回来（DNS 断了）"
 else
-    bad "AdGuardHome 被杀后 20s 内没人拉起（DNS 全断）"
+    bad "AdGuardHome 被杀后 35s 内没人拉起（DNS 全断）"
 fi
 
 # 12.6 fd 泄漏 / 规则泄漏

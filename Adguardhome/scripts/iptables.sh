@@ -245,8 +245,17 @@ if [ $ONCE -eq 0 ] && [ $V6ONLY -eq 0 ] && [ $SNIFORCE -eq 0 ]; then
 fi
 
 # 检测Adguardhome是否存活
+# 按进程名 + 排除僵尸：
+#  - 不能用 pgrep -f "$BIN_DIR/AdGuardHome"，命令行子串匹配会被 touch/tail/cp
+#    操作过这个路径的进程（甚至 AdGuardHome.bak*）骗过，守护以为它还活着。
+#  - 只看 pidof 也不够：进程被 kill -9 后在内核收尸前会变成僵尸（Z），
+#    pidof 照样返回它，守护会一直等这块"尸体"消失（实测拖到 26 秒才开始重启），
+#    这期间 DNS 全断。僵尸要当成死的，立刻重拉。
 agh_running() {
-    pgrep -f "$BIN_DIR/AdGuardHome" >/dev/null 2>&1
+    _ap=$(pidof AdGuardHome 2>/dev/null | awk '{print $1}')
+    [ -n "$_ap" ] || return 1
+    [ "$(awk '{print $3}' "/proc/$_ap/stat" 2>/dev/null)" = "Z" ] && return 1
+    return 0
 }
 
 # 启动AdGuardHome
@@ -259,7 +268,10 @@ start_agh() {
     _lk="$AGH_DIR/.agh.start.lock"
     if ! mkdir "$_lk" 2>/dev/null; then
         _i=0
-        while [ "$_i" -lt 24 ]; do
+        # 等锁上限 5 秒（原来 12 秒）：锁多半是另一路并发启动留下的，
+        # 它成功启动 AGH 也就 2~3 秒；等 12 秒的结果是 AGH 被 kill 后
+        # 要 15 秒以上才拉回来，DNS 白断十几秒。
+        while [ "$_i" -lt 10 ]; do
             agh_running && { rm -rf "$_lk" 2>/dev/null; return 0; }
             sleep 0.5
             _i=$((_i + 1))
@@ -1269,6 +1281,28 @@ mitm_proc_guard() {
     return 0
 }
 
+# 守护单例：本脚本没有 --daemon 参数解析，任何一次 `sh iptables.sh` 都会
+# 一路跑到下面的 while true，于是开机 service.sh、手动执行、旧残留会同时存在
+# 好几个守护。它们每轮都并发抢 .agh.start.lock，AGH 被 kill 后谁都得等满锁超时，
+# 重启被拖到十几二十秒。这里用 pidfile 保证只有一份在跑。
+_dpid_file="$AGH_DIR/.daemon.pid"
+_dold=$(cat "$_dpid_file" 2>/dev/null | tr -d ' \n')
+if [ -n "$_dold" ] && [ "$_dold" != "$$" ] && kill -0 "$_dold" 2>/dev/null; then
+    exit 0
+fi
+echo $$ > "$_dpid_file" 2>/dev/null
+
+# 轻量存活看门狗：主循环一轮要做 sync_redir_port / 端口扫描 / 各种 iptables 查询，
+# 设备上 netd 的 iptables-restore 常霸着 xtables 锁，一轮实测能拖到 25 秒，
+# 放在主循环里的 AGH 存活检查也跟着变成 25 秒才响应一次 → AGH 被系统杀掉后
+# DNS 白断二十多秒。这里单独开一个 2 秒一轮的子循环，只干「活着吗/不在就拉」，
+# 与重活解耦；拉起用同一把 mkdir 锁，和主循环不会起两个实例。
+( while true; do
+      sleep 2
+      date +%s > "$AGH_DIR/.daemon_hb" 2>/dev/null
+      agh_running || start_agh
+  done ) &
+
 while true; do
     date +%s > "$AGH_DIR/.daemon_hb" 2>/dev/null
     echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
@@ -1276,9 +1310,16 @@ while true; do
     [ -n "$vpn_compat" ] || vpn_compat=proxy
     [ -n "$vpn_apps" ] || vpn_apps=""
     [ -n "$v6_dns" ] || v6_dns=auto
-    sync_redir_port
+    # AGH 存活检查放最前面并且当场拉起：底下 sync_redir_port 会调 iptables，
+    # 设备上别的进程（netd 的 iptables-restore）经常霸着 xtables 锁，
+    # 那一串命令能把一轮循环拖到 8~13 秒；把它们排在重启判断前面，
+    # AGH 被 kill 后要等十几秒才拉起、DNS 白断十几秒。
     need_restart=0
-    agh_running || need_restart=1
+    if ! agh_running; then
+        need_restart=1
+        start_agh
+    fi
+    sync_redir_port
     if [ -x "$SMARTDNS_BIN" ] && ! smartdns_running; then
         start_smartdns
     fi
@@ -1370,7 +1411,7 @@ while true; do
     vpnstate="$vnow|$vpn_compat|$(v6_effective)"
     [ "$vpnstate" != "$last_vpnstate" ] && need_fix=1
 
-    [ $need_restart -eq 1 ] && start_agh
+    [ $need_restart -eq 1 ] && start_agh   # 通常循环开头已经起过，这里的第二次调用被锁+存活检查直接短路
     cur_agh=0
     agh_running && cur_agh=1
     if [ $need_restart -eq 1 ] || [ $need_fix -eq 1 ] || [ "$cur_agh" != "$last_agh" ]; then
