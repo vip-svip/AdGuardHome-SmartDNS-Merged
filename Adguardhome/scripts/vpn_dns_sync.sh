@@ -19,10 +19,35 @@ STATE="$AGH_DIR/vpn_dns.state"
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG" 2>/dev/null; }
 
-# AGH 实际 DNS 端口（yaml 里 dns 段的 port）
-agh_port() {
+# yaml 里声明的 DNS 端口
+yaml_port() {
     [ -f "$YAML" ] || return 1
     awk '/^dns:/{f=1;next} f&&/^[^[:space:]]/{exit} f&&/^[[:space:]]*port:/{gsub(/[^0-9]/,"",$2); print $2; exit}' "$YAML" 2>/dev/null
+}
+
+# AGH 进程实际监听的 DNS 端口。
+# 为什么不能只信 yaml：AGH 启动时若发现端口被占用会静默回退到随机端口，
+# 并且不会把新端口写回 yaml——此时按 yaml 注入会让 VPN 指向没人监听的端口，
+# 表现为「VPN 连上后解析全挂」。所以优先以实际监听端口为准。
+agh_port() {
+    _ap=$(yaml_port)
+    _pid=$(pidof AdGuardHome 2>/dev/null | awk '{print $1}')
+    if [ -n "$_pid" ]; then
+        _live=$(netstat -ulnp 2>/dev/null | grep "$_pid/AdGuardHome" | awk '{print $4}' \
+                | sed 's/.*://' | grep -E '^[0-9]+$' | grep -vx 53 | head -1)
+        [ -z "$_live" ] && _live=$(ss -ulnp 2>/dev/null | grep "pid=$_pid" | awk '{print $4}' \
+                | sed 's/.*://' | grep -E '^[0-9]+$' | grep -vx 53 | head -1)
+        if [ -n "$_live" ]; then
+            # 实际端口与 yaml 不一致 → 把 yaml 校正回来（下次启动才稳定）
+            if [ -n "$_ap" ] && [ "$_live" != "$_ap" ]; then
+                _ln=$(grep -n "port:" "$YAML" 2>/dev/null | sed -n '2p' | cut -d: -f1)
+                [ -n "$_ln" ] && sed -i "${_ln}s/.*/  port: $_live/" "$YAML" 2>/dev/null \
+                    && log "port drift: yaml $_ap -> actual $_live (yaml corrected)"
+            fi
+            echo "$_live"; return 0
+        fi
+    fi
+    [ -n "$_ap" ] && echo "$_ap"
 }
 
 # 需要处理的配置（glob），覆盖常见的 Android VPN / 内核代理应用
