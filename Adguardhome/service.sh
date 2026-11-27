@@ -256,13 +256,36 @@ agh_running() { pgrep -f "$BIN_DIR/AdGuardHome" >/dev/null 2>&1; }
 smartdns_running() { pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------
-# 动态端口随机化（仅在 AGH 未运行时——避免重启时把正在用的端口改掉）
+# DNS 端口分配（仅在 AGH 未运行时——避免重启时把正在用的端口改掉）
+#
+# 旧实现每次开机随机 30000-65535：与「端口固定 5591 防漂移」的设计目标自相矛盾，
+# 端口一变，vpn_dns_sync 注入的 nameserver、aghmitm -dns、面板排查记录全部对不上；
+# 而且随机区间与内核临时端口段（32768-60999）重叠，REDIRECT 偶尔会撞上已占用端口。
+#
+# 现在改成确定性分配：优先 redir_port（默认 5591），被占用才向后顺延探测，
+# 20 个候选都不行才退回随机。结果写回 config.prop，下一次开机继续用同一个。
 # ---------------------------------------------------------------
 if ! agh_running; then
-    R1=$((30000+RANDOM%35536)); R2=40251
-    sed -i "/^dns:/,/^[^[:space:]]/ s/^\([[:space:]]*port:\) [0-9]*/\1 $R1/; s/^\([[:space:]]*address:\) [0-9.]*:[0-9]*/\1 0.0.0.0:$R2/" "$BIN_DIR/AdGuardHome.yaml"
+    _want=$(sed -n 's/^redir_port=//p' "$SCRIPT_DIR/config.prop" 2>/dev/null | tail -1)
+    case "$_want" in ''|*[!0-9]*) _want=5591 ;; esac
+    _r1=""
+    _try=0
+    _cand=$_want
+    while [ "$_try" -lt 20 ]; do
+        if ! port_listening "$_cand" udp; then
+            _r1=$_cand
+            break
+        fi
+        _cand=$((_cand + 1))
+        _try=$((_try + 1))
+    done
+    [ -n "$_r1" ] || _r1=$((31000 + RANDOM % 20000))
+    sed -i "/^dns:/,/^[^[:space:]]/ s/^\([[:space:]]*port:\) [0-9]*/\1 $_r1/" "$BIN_DIR/AdGuardHome.yaml"
+    # 面板端口不做二次改写：原来的 address 替换写在 dns: 范围里，永远匹配不到
+    # http: 段的 address，是死代码，已删除（面板端口以 yaml 原值为准）。
     chattr -i "$SCRIPT_DIR/config.prop" 2>/dev/null
-sed -i "s/^redir_port=.*/redir_port=$R1/" "$SCRIPT_DIR/config.prop"
+    sed -i "s/^redir_port=.*/redir_port=$_r1/" "$SCRIPT_DIR/config.prop"
+    [ "$_r1" = "$_want" ] || log "[INFO] DNS 端口 $_want 被占用，改用 $_r1（已写回 config.prop）。"
 fi
 
 # ---------------------------------------------------------------
