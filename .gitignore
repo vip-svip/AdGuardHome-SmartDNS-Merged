@@ -1,15 +1,17 @@
 # ---- 运行期数据 / 缓存，不进仓库 ----
-module/bin/data/
-module/bin/*.log
-module/bin/crash.log
-module/rules/subscriptions/
-module/smartdns/tmp/
-module/smartdns/run/
-module/smartdns/var/
-module/smartdns/data/
-module/smartdns/proc/
-module/smartdns/sys/
-module/smartdns/dev/
+# 模块树只有一棵：Adguardhome/。为避免再次出现「两棵树、.gitignore 只覆盖其中一棵」
+# 导致运行时缓存被提交进仓库的老问题，这里统一用路径无关的写法。
+**/bin/data/
+**/bin/*.log
+**/bin/crash.log
+**/rules/subscriptions/
+**/smartdns/tmp/
+**/smartdns/run/
+**/smartdns/var/
+**/smartdns/data/
+**/smartdns/proc/
+**/smartdns/sys/
+**/smartdns/dev/
 *.zip
 
 # ---- 构建产物 ----
@@ -36,6 +38,9 @@ desktop.ini
 *.rej
 go.mod.bak
 go.sum.bak
+
+# ---- 历史构建变体：只保留当前在用的那一个二进制 ----
+Adguardhome/bin/AdGuardHome-t*
 
 # ---- 凭据 ----
 .gh_token
