@@ -52,7 +52,7 @@ h2{font-size:15px;margin:26px 0 10px}
   <div class="msg" id="msg"></div>
 </div>
 <script>
-var KEYS = ['dns','vpn','ip','ntp','dhcp','smb','tcp','snmp','sb','par'];
+var KEYS = ['dns','vpn','ip','ntp','dhcp','smb','tcp','snmp'];
 var ITEMS = [
   {k:'dns', t:'防止 DNS 泄露', d:'丢弃 mDNS / SSDP / NetBIOS 探针，全部解析强制走 AGH 加密上游，检测网站看不到运营商 DNS。'},
   {k:'vpn', t:'防止 VPN 泄露', d:'阻断 STUN / TURN 与 Teredo 隧道协商，WebRTC 暴露不出真实出口；VPN 断开也不回落到本地网络。'},
@@ -61,9 +61,7 @@ var ITEMS = [
   {k:'dhcp',t:'防止 DHCP 探测泄露', d:'丢弃出网 DHCP 广播（UDP 67）。防恶意热点通过 DHCP 指纹识别设备型号与系统。'},
   {k:'smb', t:'防止局域网探测泄露', d:'丢弃 NetBIOS / SMB 出网流量（137/139/445）。防内网扫描器读取设备名与共享目录。'},
   {k:'tcp', t:'防止明文协议泄露', d:'丢弃 Telnet / SMTP / POP3 / IMAP 明文端口出网（23/25/110/143）。防 App 明文回传数据。'},
-  {k:'snmp',t:'防止 SNMP 信息泄露', d:'丢弃 SNMP 查询与陷阱（161/162）。防设备信息（系统版本、接口列表）被读取。'},
-  {k:'sb',  t:'恶意网站拦截', d:'AGH Safebrowsing 引擎：访问钓鱼 / 恶意域名时在 DNS 与 SNI 双层拦截，全 App 生效。'},
-  {k:'par', t:'成人内容过滤', d:'AGH 家长控制引擎：DNS 层屏蔽成人网站域名解析，系统级生效。'}
+  {k:'snmp',t:'防止 SNMP 信息泄露', d:'丢弃 SNMP 查询与陷阱（161/162）。防设备信息（系统版本、接口列表）被读取。'}
 ];
 
 var state = null;          // null = 未知（还没拿到真值）
@@ -89,7 +87,7 @@ function paint(){
   }
   Array.prototype.forEach.call(box.querySelectorAll('button.sw'), function(b){
     var k = b.getAttribute('data-k');
-    var v = state ? (state[k]|0) : null;
+    var v = (state && state[k] !== null && state[k] !== undefined) ? (state[k]|0) : null;
     var cls, label, dis = false;
     if (busy[k]) { cls='busy'; label='应用中…'; dis=true; }
     else if (v === null) { cls='off'; label='读取中'; dis=true; }
@@ -105,17 +103,21 @@ function absorb(j){
   KEYS.forEach(function(k){ s[k] = (j[k]|0) ? 1 : 0; });
   state = s;
   try { localStorage.setItem(CACHE_KEY, JSON.stringify(s)); } catch(e){}
-  if (j.sb_blocked || j.par_blocked) msg('恶意网站拦截 / 成人内容过滤的上游服务在本网络不可达，已保持关闭（强开会导致整机断网）', 'warn');
-  else msg('');
+  msg('');
   paint();
 }
 
 // 首屏：服务器把真值内联进来了（<head> 里 sync 引的 ?embed=1），
 // 直接按真值画，不出现「先全关 → 再逐个翻开」的闪烁。
 // 内联缺失（CGI 挂了）才退回 localStorage 缓存 / 未知态。
+// 缺失的键记成 null（＝未知），paint 时显示「读取中」而不是「已关闭」：
+// 宁可先显示「读取中」，也不要先画成关、再翻成开——那一下翻转就是用户看到的闪烁。
 function norm(j){
   var s = {};
-  KEYS.forEach(function(k){ s[k] = (j[k]|0) ? 1 : 0; });
+  KEYS.forEach(function(k){
+    var v = j[k];
+    s[k] = (v === undefined || v === null) ? null : ((v|0) ? 1 : 0);
+  });
   return s;
 }
 (function boot(){

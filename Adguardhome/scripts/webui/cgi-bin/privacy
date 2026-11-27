@@ -5,13 +5,16 @@
 #   1) GET 是纯只读，绝不重建 iptables —— 重建只在 POST / --apply 时发生。
 #      旧版 GET 每次都 apply()：-F 后重加 ~40 条规则，实测 1.6~2.7s，
 #      前端开关在拿到响应前只能按默认值渲染 → 刷新时「关一下再打开」。
-#   2) GET 优先回缓存（毫秒级），过期才在后台刷新 AGH 的 sb/par 状态（setsid 脱离）。
+#   2) GET 优先回缓存（毫秒级）；真值全部来自本机 conf / iptables。
+#      （旧版在这里查 AGH 的 safebrowsing / parental 引擎，缓存值与引擎实际状态
+#        不一致时，页面首帧画「已关闭」、异步回来再翻「已开启」→ 那一下闪烁。
+#        这两个开关已整体删除，不再有异步真值。）
 #   3) apply() 先建暂存链再原子换挂（iptables -E 会同步更新引用），
-#      不再有「链已清空、规则未加」的裸奔窗口；并合并 multiport 减少 fork。
+#      不再有「链已清空、规则未加」的裸奔段；并合并 multiport 减少 fork。
 #   4) 规则集未变（sig 相同且链在挂）时直接跳过重建。
 #
-# GET  -> {"dns":1,"vpn":1,"ip":1,"sb":0,"par":0,"ntp":1,...,"applied":1}
-# POST -> body: dns=1&vpn=0&ip=1&sb=1&par=0
+# GET  -> {"dns":1,"vpn":1,"ip":1,"ntp":1,...,"applied":1}
+# POST -> body: dns=1&vpn=0&ip=1&ntp=1
 # CLI  -> sh privacy --apply   (开机/守护调用，只建规则)
 #         sh privacy --refresh (后台刷新 AGH 状态并写缓存)
 CONF=/data/adb/agh/privacy.conf
@@ -32,7 +35,7 @@ cors() {
 
 # 一次 awk 解析全部键（旧版 10 次 sed = 10 个 fork ≈ 250ms）
 load_conf() {
-    DNS=1; VPN=1; IP=1; SB=0; PAR=0; NTP=1; DHCP=1; SMB=1; TCP=1; SNMP=1
+    DNS=1; VPN=1; IP=1; NTP=1; DHCP=1; SMB=1; TCP=1; SNMP=1
     [ -f "$CONF" ] || return 0
     _kv=$(awk -F= '
         {
@@ -40,7 +43,7 @@ load_conf() {
             gsub(/[ \t\r]/, "", k); gsub(/[ \t\r]/, "", v)
             sub(/[#;].*/, "", v)
             if (v != "0" && v != "1") next
-            if (k == "dns" || k == "vpn" || k == "ip" || k == "sb" || k == "par" ||
+            if (k == "dns" || k == "vpn" || k == "ip" ||
                 k == "ntp" || k == "dhcp" || k == "smb" || k == "tcp" || k == "snmp")
                 printf "%s=%s\n", toupper(k), v
         }' "$CONF" 2>/dev/null)
@@ -49,57 +52,40 @@ load_conf() {
 }
 
 save_conf() {
-    printf 'dns=%s\nvpn=%s\nip=%s\nsb=%s\npar=%s\nntp=%s\ndhcp=%s\nsmb=%s\ntcp=%s\nsnmp=%s\n' \
-        "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP" > "$CONF" 2>/dev/null
+    printf 'dns=%s\nvpn=%s\nip=%s\nntp=%s\ndhcp=%s\nsmb=%s\ntcp=%s\nsnmp=%s\n' \
+        "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP" > "$CONF" 2>/dev/null
 }
 
 state_write() {
-    _json=$(printf '{"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":1}' \
-        "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP")
+    _json=$(printf '{"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":1}' \
+        "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP")
     printf '%s\n' "$_json" > "$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE" 2>/dev/null
     # 连同响应头一起落盘：GET 命中时整个响应只需一次 cat（~20ms）
     { cors; printf '%s\n' "$_json"; } > "$RESP.tmp" 2>/dev/null && mv -f "$RESP.tmp" "$RESP" 2>/dev/null
 }
 
-# ---- AGH 面板 API（sb / parental 引擎在 fork 内，开关只能走原生接口）----
+# ---- AGH 原生引擎（safebrowsing / parental）已从隐私页移除 ----
+# 这两个开关原来要读 AGH 原生接口拿真值：embed 里只能填 conf 缓存值，
+# 而 AGH 引擎的真实状态（AGH 自己也会改）跟缓存值不一致 → 首帧画「已关闭」、
+# 异步 GET 回来才翻成「已开启」，就是那一下「关掉又打开」。
+# 现在直接删掉这两个开关，页面所有开关的真值都来自本机 conf / iptables，
+# 首帧即最终值，不存在翻转。引擎本身在 --apply 里兜底关闭（见 agh_engines_off）。
 AGH_API="http://127.0.0.1:40251/control"
-agh_set() { # $1=safebrowsing|parental  $2=enable|disable
-    curl -s -o /dev/null -m 2 -u "root:root" -X POST "$AGH_API/$1/$2" 2>/dev/null \
-      || wget -q -O /dev/null --timeout=2 --user=root --password=root --method=POST "$AGH_API/$1/$2" 2>/dev/null
-}
 
-agh_status() { # $1=safebrowsing|parental  -> 1/0，不可达时输出空（调用方沿用 conf 值）
-    _v=$(curl -s -m 2 -u "root:root" "$AGH_API/$1/status" 2>/dev/null | grep -o '"enabled":[a-z]*' | grep -o 'true\|false')
-    case "$_v" in
-        true)  echo 1 ;;
-        false) echo 0 ;;
-        *)     echo "" ;;
-    esac
-}
-
-# SB/Parental 开启预检：family.adguard-dns.com 的 DoH 在部分网络不可达，
-# 强开会让 AGH 全部查询阻塞（整机断网）。0=可达 1=不可达
-sb_upstream_ok() {
-    for _ip in 94.140.14.14 94.140.15.15 94.140.14.34 94.140.15.34; do
-        timeout 4 sh -c "echo > /dev/tcp/$_ip/443" 2>/dev/null && return 0
+# 删掉开关后不能把引擎留在开启态（否则用户再也关不掉它）。
+# 幂等：只在本机状态确实为开时才打接口，开机 --apply 时跑一次。
+agh_engines_off() {
+    [ -x /system/bin/curl ] || command -v curl >/dev/null 2>&1 || return 0
+    for _e in safebrowsing parental; do
+        _on=$(curl -s -m 2 -u "root:root" "$AGH_API/$_e/status" 2>/dev/null | grep -o '"enabled":true')
+        [ -n "$_on" ] && curl -s -o /dev/null -m 2 -u "root:root" -X POST "$AGH_API/$_e/disable" 2>/dev/null
     done
-    curl -s -o /dev/null -m 4 'https://94.140.14.14/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDb3JnAAABAAE' 2>/dev/null
-    _c=$?
-    { [ "$_c" = "0" ] || [ "$_c" = "22" ]; } && return 0
-    return 1
+    return 0
 }
 
-# 同步刷新 sb/par（两个 curl 并行，约 0.1~0.2s），随后写缓存
+# 状态缓存：全部来自本机 conf（不再查 AGH，GET 更稳更快）
 refresh_state() {
     load_conf
-    _t="/data/adb/agh/.pv.$$"
-    ( agh_status safebrowsing > "$_t.sb" 2>/dev/null ) &
-    ( agh_status parental > "$_t.par" 2>/dev/null ) &
-    wait
-    _sb=$(cat "$_t.sb" 2>/dev/null); _par=$(cat "$_t.par" 2>/dev/null)
-    rm -f "$_t.sb" "$_t.par" 2>/dev/null
-    case "$_sb" in 0|1) SB=$_sb ;; esac
-    case "$_par" in 0|1) PAR=$_par ;; esac
     state_write
 }
 
@@ -225,6 +211,7 @@ case "$1" in
     --apply)
         load_conf
         apply
+        agh_engines_off   # 开关已删，兜底确保 safebrowsing/parental 引擎不会留在开启态
         refresh_state
         exit 0
         ;;
@@ -241,8 +228,8 @@ case "$QUERY_STRING" in
         load_conf
         printf 'Content-Type: text/javascript; charset=utf-8\r\n'
         printf 'Cache-Control: no-store, no-cache, must-revalidate\r\n\r\n'
-        printf 'window.__AGH_PRIV={"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s};\n' \
-            "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP"
+        printf 'window.__AGH_PRIV={"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s};\n' \
+            "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP"
         exit 0
         ;;
 esac
@@ -262,10 +249,6 @@ case "$REQUEST_METHOD" in
             body=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
         fi
         load_conf
-        # 记住旧值：sb / parental 的开关只在 AGH 里生效，值是「没变」时再打一次
-        # AGH API 纯粹是白等 —— 真机实测每次 POST 3.0s，两次 curl 各 1s+。
-        OLD_SB=$SB
-        OLD_PAR=$PAR
         # 一次 tr/sed 全部取值（旧版 10 条管道）
         _pv=$(printf '%s' "$body" | tr '&' '\n' | awk -F= '
             { k=$1; v=$2; if (v=="0"||v=="1") printf "%s=%s\n", toupper(k), v }')
@@ -273,29 +256,17 @@ case "$REQUEST_METHOD" in
         case "$DNS" in 0|1) ;; *) DNS=1 ;; esac
         case "$VPN" in 0|1) ;; *) VPN=1 ;; esac
         case "$IP"  in 0|1) ;; *) IP=1  ;; esac
-        case "$SB"  in 0|1) ;; *) SB=0  ;; esac
-        case "$PAR" in 0|1) ;; *) PAR=0 ;; esac
         case "$NTP" in 0|1) ;; *) NTP=1 ;; esac
         case "$DHCP" in 0|1) ;; *) DHCP=1 ;; esac
         case "$SMB" in 0|1) ;; *) SMB=1 ;; esac
         case "$TCP" in 0|1) ;; *) TCP=1 ;; esac
         case "$SNMP" in 0|1) ;; *) SNMP=1 ;; esac
-        SB_BLOCKED=0; PAR_BLOCKED=0
-        if [ "$SB" = "1" ] && ! sb_upstream_ok; then SB=0; SB_BLOCKED=1; fi
-        if [ "$PAR" = "1" ] && ! sb_upstream_ok; then PAR=0; PAR_BLOCKED=1; fi
         save_conf
         apply
-        # 只有值变化（或被 blocked 降级）才动 AGH 原生接口
-        if [ "$SB" != "$OLD_SB" ] || [ "$SB_BLOCKED" = "1" ]; then
-            [ "$SB" = "1" ] && agh_set safebrowsing enable || agh_set safebrowsing disable
-        fi
-        if [ "$PAR" != "$OLD_PAR" ] || [ "$PAR_BLOCKED" = "1" ]; then
-            [ "$PAR" = "1" ] && agh_set parental enable || agh_set parental disable
-        fi
         state_write
         cors
-        printf '{"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"sb_blocked":%s,"par_blocked":%s,"applied":1}\n' \
-            "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP" "$SB_BLOCKED" "$PAR_BLOCKED"
+        printf '{"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":1}\n' \
+            "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP"
         ;;
     *)
         # GET：只读，绝不动 iptables。命中预生成响应（含响应头）就是一次 cat。
@@ -315,8 +286,8 @@ case "$REQUEST_METHOD" in
         else
             load_conf
             cors
-            printf '{"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":1}\n' \
-                "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP"
+            printf '{"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":1}\n' \
+                "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP"
         fi
         ;;
 esac
