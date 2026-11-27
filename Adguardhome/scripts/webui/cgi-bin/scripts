@@ -6,6 +6,7 @@
 #   GET  ?read=NAME                       读取脚本全文（本地查看/编辑）
 #   GET  ?catalog=1                       内置脚本清单（从列表添加用）
 #   GET  ?addcat=KIND/FILE                从内置清单添加一个脚本
+#   GET  ?addurl=NAME&url=URL             从远程地址下载脚本
 #   POST ?save=NAME  body=<内容>          保存（新建或覆盖编辑）
 #   POST ?upload=NAME body=<内容>         上传本地文件
 #   GET  ?del=NAME                        删除
@@ -136,6 +137,29 @@ esac
 
 Q="$QUERY_STRING"
 case "$Q" in
+    *addurl=*)
+        # 远程下载：?addurl=NAME&url=ENCODED_URL
+        _n=$(printf '%s' "$Q" | tr '&' '\n' | sed -n 's/^addurl=//p' | head -1 | sed 's/%20/ /g')
+        _u=$(printf '%s' "$Q" | tr '&' '\n' | sed -n 's/^url=//p' | head -1 | sed 's/%3A/:/g; s/%2F/\//g; s/%3F/?/g; s/%3D/=/g; s/%26/\&/g; s/%25/%/g; s/+/ /g')
+        case "$_n" in ""|*/*|*..*) cors; printf '{"ok":false,"error":"bad name"}\n'; exit 0 ;; esac
+        case "$_u" in http*://*) : ;; *) cors; printf '{"ok":false,"error":"bad url"}\n'; exit 0 ;; esac
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL --max-time 30 -A "Mozilla/5.0" "$_u" -o "$DIR/$_n" 2>/dev/null
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q -T 30 -U "Mozilla/5.0" -O "$DIR/$_n" "$_u" 2>/dev/null
+        fi
+        if [ -s "$DIR/$_n" ]; then
+            chmod 644 "$DIR/$_n" 2>/dev/null
+            rm -f "$DIR/.$_n.off" 2>/dev/null
+            _sz=$(wc -c < "$DIR/$_n" 2>/dev/null | tr -d ' ')
+            do_apply >/dev/null 2>&1
+            cors; printf '{"ok":true,"name":"%s","size":%s}\n' "$(json_escape "$_n")" "${_sz:-0}"
+        else
+            rm -f "$DIR/$_n" 2>/dev/null
+            cors; printf '{"ok":false,"error":"下载失败"}\n'
+        fi
+        exit 0
+        ;;
     *apply=*)  do_apply; exit 0 ;;
     *catalog=*)
         cors

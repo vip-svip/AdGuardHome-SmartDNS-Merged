@@ -1,25 +1,33 @@
-! 内置默认脚本：基础拦截（可停用、可编辑、可删除）
-! 作用：模块首次开机自动释放，保证「脚本」页不是空的，给一个可直接用的起点。
-! 语法：小火箭 / Surge / Loon 通用重写写法，reject 类规则会被汇总进「脚本拦截」DNS 过滤器。
-!
-! ── 广告与统计 SDK ─────────────────────────────
-^https?://.*\.umeng\.com/ url reject
-^https?://.*\.umengcloud\.com/ url reject
-^https?://.*\.growingio\.com/ url reject
-^https?://.*\.sensorsdata\.cn/ url reject
-^https?://app-measurement\.com/ url reject
-^https?://.*\.appsflyer\.com/ url reject
-^https?://.*\.adjust\.com/ url reject
-!
-! ── 国内常见广告域 ─────────────────────────────
-^https?://.*\.gdt\.qq\.com/ url reject
-^https?://.*\.pos\.baidu\.com/ url reject
-^https?://.*\.cpro\.baidu\.com/ url reject
-^https?://.*\.tanx\.com/ url reject
-^https?://.*\.alimama\.com/ url reject
-!
-! ── 追踪与行为采集 ─────────────────────────────
-^https?://.*\.doubleclick\.net/ url reject
-^https?://.*\.google-analytics\.com/ url reject
-^https?://.*\.googletagmanager\.com/ url reject
-^https?://.*\.branch\.io/ url reject
+#! 内置默认脚本 —— 示例与说明（可编辑、可停用、可删除）
+#!
+#! 【这是什么】
+#! 这是「脚本」页的默认脚本，演示支持的语法。规则会被汇总到
+#! 「过滤器 → 脚本拦截.txt」，DNS 层立即生效，App 内 HTTPS 广告由
+#! MITM/QUIC/SNI 层配合拦截。
+#!
+#! 【支持的格式】
+#!   1. 小火箭重写：   ^https?://ads.example.com/ url reject
+#!   2. hosts 写法：   127.0.0.1 ads.example.com
+#!   3. 域名列表：     ads.example.com（一行一个，自动按域名拦截）
+#!   4. Surge/Loon：   URL REGEX /ads/ REJECT 也兼容
+#!   5. Clash/sing-box YAML payload 列表也可直接粘贴
+#!
+#! 【下面的示例】只是演示，全部以 #! 开头的行不会被当成规则。
+#! 想拦截真实广告，请点「添加 → 从列表」导入内置脚本库（2800+ 个）。
+
+#! —— 示例 1：小火箭重写（URL 正则拒绝）——
+^https?://ads\.example\.com/ url reject
+^https?://track\.example\.com/pixel url reject-200
+
+#! —— 示例 2：hosts 写法（把域名指到本地）——
+127.0.0.1 ads2.example.com
+
+#! —— 示例 3：纯域名（DNS 层直接拦）——
+ads3.example.com
+stats.example.net
+
+#! 【怎么用】
+#!  1. 本页开关控制这条脚本是否参与汇总
+#!  2. 点表格行里的「本地查看 / 编辑」可看可改
+#!  3. 改完点上方「更新列表」重新汇总
+#!  4. 更多脚本：点「添加」→「从列表」，2800+ 个小火箭/Loon/Surge 模块任选
