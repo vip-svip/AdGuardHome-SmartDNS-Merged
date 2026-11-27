@@ -150,7 +150,7 @@ esac
 hdr "4. 面板访问防护（panel_lan_only）"
 PLO=$(prop panel_lan_only)
 if [ "$PLO" = "1" ]; then
-    iptables -S AGH_WEBUI >/dev/null 2>&1 && ok "AGH_WEBUI 链存在" || bad "panel_lan_only=1 但 AGH_WEBUI 链不存在"
+    iptables -w 2 -S AGH_WEBUI >/dev/null 2>&1 && ok "AGH_WEBUI 链存在" || bad "panel_lan_only=1 但 AGH_WEBUI 链不存在"
     WI=$(iptables -S INPUT 2>/dev/null | _gr -c -- '-j AGH_WEBUI')
     [ "$WI" = "1" ] && ok "INPUT 恰好一条 AGH_WEBUI 跳转" || bad "INPUT 的 AGH_WEBUI 跳转数=$WI"
     for p in 40251 6080 6081; do
@@ -199,12 +199,12 @@ if [ -f "$AGH_DIR/scripts/iptables.sh" ]; then
 fi
 
 hdr "6. 隐私防护"
-iptables -S AGH_PRIV >/dev/null 2>&1 && ok "AGH_PRIV 链存在" || bad "AGH_PRIV 链不存在"
+iptables -w 2 -S AGH_PRIV >/dev/null 2>&1 && ok "AGH_PRIV 链存在" || bad "AGH_PRIV 链不存在"
 PO=$(iptables -S OUTPUT 2>/dev/null | _gr -c -- '-j AGH_PRIV')
 [ "$PO" = "1" ] && ok "OUTPUT 恰好一条 AGH_PRIV 跳转" || bad "AGH_PRIV 跳转数=$PO"
-B1=$(iptables -S AGH_PRIV 2>/dev/null | md5sum); B16=$(ip6tables -S AGH_PRIV 2>/dev/null | md5sum)
+B1=$(iptables -w 2 -S AGH_PRIV 2>/dev/null | md5sum); B16=$(ip6tables -w 2 -S AGH_PRIV 2>/dev/null | md5sum)
 for i in 1 2 3 4 5; do curl -s -o /dev/null "http://$HOST:6081/cgi-bin/privacy" 2>/dev/null; done
-A1=$(iptables -S AGH_PRIV 2>/dev/null | md5sum); A16=$(ip6tables -S AGH_PRIV 2>/dev/null | md5sum)
+A1=$(iptables -w 2 -S AGH_PRIV 2>/dev/null | md5sum); A16=$(ip6tables -w 2 -S AGH_PRIV 2>/dev/null | md5sum)
 [ "$B1" = "$A1" ] && ok "连续 5 次 privacy GET 未改动 v4 规则" || bad "privacy GET 在改 v4 规则（读操作写系统）"
 [ "$B16" = "$A16" ] && ok "连续 5 次 privacy GET 未改动 v6 规则" || bad "privacy GET 在改 v6 规则"
 iptables -S 2>/dev/null | _gr -q '^-N AGH_PRIV_N' && bad "残留暂存链 AGH_PRIV_N" || ok "无残留暂存链"
@@ -281,6 +281,124 @@ done
 if [ -n "$BB" ]; then
     "$BB" grep -qi 'syntax error\|no closing quote\|not found' "$AGH_DIR/agh-stdout.log" 2>/dev/null && bad "agh-stdout.log 里有 shell 报错" || ok "agh-stdout.log 无 shell 报错"
 fi
+
+hdr "12. 端到端与自愈（会短暂杀进程，放最后一组）"
+
+# 12.0 首屏不闪烁：privacy 页在 <head> 同步引 ?embed=1，第一次渲染就是真值
+_em=$(curl -s -m 5 "http://$HOST:6081/cgi-bin/privacy?embed=1" 2>/dev/null)
+case "$_em" in
+  *"window.__AGH_PRIV={"*) ok "privacy ?embed=1 返回内联状态（首屏零闪烁）" ;;
+  *) bad "privacy ?embed=1 没返回内联状态（首屏会先画默认值再翻）" ;;
+esac
+_ph=$(curl -s -m 5 "http://$HOST:6081/privacy.html" 2>/dev/null | _gr -c 'privacy?embed=1')
+[ "${_ph:-0}" -ge 1 ] && ok "privacy.html 已内联 embed 脚本（$_ph 处）" \
+                      || bad "privacy.html 没有内联 embed 脚本（首屏仍会闪）"
+
+# 12.1 真实 DNS 解析：手搓 27 字节 A 查询（八进制转义，mksh/busybox printf 都认）
+_q=/data/local/tmp/.fc_q.bin
+printf '\022\064\001\000\000\001\000\000\000\000\000\000\005baidu\003com\000\000\001\000\001' > "$_q" 2>/dev/null
+if [ "$(wc -c < "$_q" 2>/dev/null | tr -d ' ')" = "27" ]; then
+    "$BB" nc -u -w 3 127.0.0.1 "$RP" < "$_q" > "$_q.a" 2>/dev/null
+    _an=$(wc -c < "$_q.a" 2>/dev/null | tr -d ' ')
+    [ "${_an:-0}" -gt 40 ] && ok "5591 有真实 DNS 应答（${_an}B）" || bad "5591 没有应答（${_an}B，DNS 服务没在干活）"
+    # 12.2 53 端口劫持：从本机打 8.8.8.8:53 的探针会被 uid0 豁免（ADGUARD 链对
+    # root 自己出手的包 RETURN），所以不能拿「querylog 有没有涨」当判据。改成看
+    # 劫持链本身的语义：nat OUTPUT 有跳转、生效链里 53 确实 REDIRECT 到 AGH 端口。
+    _vc=""
+    for _c in $(iptables -w 2 -t nat -S OUTPUT 2>/dev/null | _gr -oE '\-j [A-Za-z0-9_]+' | sed 's/^-j //'); do
+        case "$_c" in REDIRECT|ACCEPT|DROP|RETURN|wmsctrl*) continue ;; esac
+        if iptables -w 2 -t nat -S "$_c" 2>/dev/null | _gr -q -- "--dport 53 -j REDIRECT --to-ports $RP"; then _vc=$_c; break; fi
+    done
+    _rj=$(iptables -w 2 -t nat -S "${_vc:-ADGUARD}" 2>/dev/null | _gr -c -- "--dport 53 -j REDIRECT --to-ports $RP")
+    [ "${_rj:-0}" -ge 1 ] \
+        && ok "nat 生效链 ${_vc} 里 53 端口 REDIRECT 到 $RP（劫持语义成立）" \
+        || bad "nat 生效链 ${_vc} 里没有 53 → REDIRECT $RP（劫持链断了）"
+    _lan=$(curl -s -m 5 -u root:root "http://$HOST:40251/control/querylog?limit=50" 2>/dev/null \
+           | _gr -oE '"client":"[^"]*"' | _gr -v '127\.0\.0\.1' | head -1)
+    [ -n "$_lan" ] && note "querylog 里有局域网客户端流量：$_lan" \
+                   || note "querylog 最近 50 条没有局域网客户端（本机探针被 uid0 豁免，属正常）"
+else
+    note "printf 未产出 27 字节查询，跳过端到端"
+fi
+
+# 12.3 6081 写路径（POST）真的会改规则，而且改完能复原
+_nb=$(iptables -w 2 -S AGH_PRIV 2>/dev/null | _gr -c '^-A')
+_nr0=$(iptables -w 2 -S AGH_PRIV 2>/dev/null | _gr -c -- '--dport 123')
+# 取反：当前有 123 就去掉，当前没有就加上 —— 断言只依赖「方向对、条数变」
+if [ "${_nr0:-0}" = "1" ]; then _want=0; else _want=1; fi
+_t=$(curl -s -m 8 -o /dev/null -w '%{time_total}' -X POST \
+      -d "dns=1&vpn=1&ip=1&ntp=$_want&dhcp=1&smb=1&tcp=1&snmp=1&sb=0&par=0" \
+      "http://$HOST:6081/cgi-bin/privacy" 2>/dev/null)
+_na=$(iptables -w 2 -S AGH_PRIV 2>/dev/null | _gr -c '^-A')
+_nr=$(iptables -w 2 -S AGH_PRIV 2>/dev/null | _gr -c -- '--dport 123')
+if [ "$_want" = "1" ]; then _exp=$(( _nb + 1 )); else _exp=$(( _nb - 1 )); fi
+[ "$_na" = "$_exp" ] && [ "${_nr:-1}" = "$_want" ] \
+    && ok "POST ntp=$_want 生效：规则 ${_nb}→${_na}，123 端口 DROP ${_nr} 条" \
+    || bad "POST ntp=$_want 没生效（${_nb}→${_na}，123 ${_nr} 条）"
+_tt=$(printf '%s' "$_t" | _gr -oE '[0-9]*\.[0-9]*' | head -1)
+# 变值路径会重建 v4+v6 两条链（还要跟 netd 的 iptables-restore 抢 xtables 锁，
+# 抢不到时 -w 2 要等满 2s）→ 阈值给 3s；真正决定「点开关转不转圈」的是幂等路径。
+_okc=$(_awk -v t="${_tt:-9}" 'BEGIN{print (t<=3.0)?"1":"0"}')
+[ "$_okc" = "1" ] && note "POST 变值（重建 v4+v6）耗时 ${_tt}s" \
+                   || bad "POST 变值耗时 ${_tt}s（>3s，xtables 锁被长期占用？）"
+# 幂等路径（同值再 POST）：应该只剩读配置 + 一次 -C 校验，页面连点开关走的就是这条
+_it=$(curl -s -m 8 -o /dev/null -w '%{time_total}' -X POST \
+       -d "dns=1&vpn=1&ip=1&ntp=$_want&dhcp=1&smb=1&tcp=1&snmp=1&sb=0&par=0" \
+       "http://$HOST:6081/cgi-bin/privacy" 2>/dev/null)
+_itn=$(printf '%s' "$_it" | _gr -oE '[0-9]*\.[0-9]*' | head -1)
+_oki=$(_awk -v t="${_itn:-9}" 'BEGIN{print (t<=1.2)?"1":"0"}')
+[ "$_oki" = "1" ] && ok "POST 幂等延迟 ${_itn}s（≤1.2s，页面连点开关不转圈）" \
+                  || bad "POST 幂等延迟 ${_itn}s（>1.2s，点开关要转圈）"
+_back=$(( 1 - _want ))
+curl -s -m 8 -o /dev/null -X POST -d "dns=1&vpn=1&ip=1&ntp=$_back&dhcp=1&smb=1&tcp=1&snmp=1&sb=0&par=0" \
+     "http://$HOST:6081/cgi-bin/privacy" 2>/dev/null
+_nrr=$(iptables -w 2 -S AGH_PRIV 2>/dev/null | _gr -c -- '--dport 123')
+[ "${_nrr:-0}" = "$_back" ] && ok "POST ntp=$_back 复原：123 端口 DROP 回到 ${_nrr} 条" \
+    || bad "复原失败（123 端口 DROP ${_nrr} 条，应 ${_back}）"
+
+# 12.4 aghmitm 自愈：kill -9 后必须有人拉起（真机实测旧版 31 秒都没人管）
+if [ -f "$AGH_DIR/mitm_on" ]; then
+    _om=$(pidof aghmitm)
+    kill -9 "$_om" 2>/dev/null
+    _i=0
+    while [ "$_i" -lt 20 ]; do
+        _nm=$(pidof aghmitm)
+        [ -n "$_nm" ] && break
+        _i=$((_i + 1)); sleep 1
+    done
+    [ -n "$_nm" ] && ok "aghmitm 被杀后 ${_i}s 内自愈（新 pid $_nm）" || bad "aghmitm 被杀后 20s 内没人拉起（SNI 消费者消失）"
+else
+    note "mitm_on 不在，跳过 aghmitm 自愈"
+fi
+
+# 12.5 AGH 自愈
+_oa=$(pidof AdGuardHome)
+kill -9 "$_oa" 2>/dev/null
+_i=0
+while [ "$_i" -lt 20 ]; do
+    _na2=$(pidof AdGuardHome)
+    [ -n "$_na2" ] && break
+    _i=$((_i + 1)); sleep 1
+done
+if [ -n "$_na2" ]; then
+    ok "AdGuardHome 被杀后 ${_i}s 内自愈（新 pid $_na2）"
+    _i=0
+    while [ "$_i" -lt 15 ]; do
+        netstat -uln 2>/dev/null | _gr -q ":$RP " && break
+        _i=$((_i + 1)); sleep 1
+    done
+    netstat -uln 2>/dev/null | _gr -q ":$RP " && ok "自愈后 udp/$RP 重新监听" || bad "自愈后 udp/$RP 没回来（DNS 断了）"
+else
+    bad "AdGuardHome 被杀后 20s 内没人拉起（DNS 全断）"
+fi
+
+# 12.6 fd 泄漏 / 规则泄漏
+_fd=$(ls /proc/"$(pidof AdGuardHome)"/fd 2>/dev/null | wc -l | tr -d ' ')
+[ "${_fd:-0}" -le 200 ] && ok "AGH fd=${_fd}（≤200" || bad "AGH fd=${_fd} 偏多（疑似句柄泄漏）"
+_s1=$(iptables -w 2 -S AGH_SNI 2>/dev/null | wc -l | tr -d ' ')$(iptables -w 2 -t nat -S OUTPUT 2>/dev/null | wc -l | tr -d ' ')$(iptables -w 2 -S AGH_PRIV 2>/dev/null | wc -l | tr -d ' ')
+sleep 15
+_s2=$(iptables -w 2 -S AGH_SNI 2>/dev/null | wc -l | tr -d ' ')$(iptables -w 2 -t nat -S OUTPUT 2>/dev/null | wc -l | tr -d ' ')$(iptables -w 2 -S AGH_PRIV 2>/dev/null | wc -l | tr -d ' ')
+[ "$_s1" = "$_s2" ] && ok "15 秒内规则行数不变（$_s1，无泄漏）" || bad "规则行数在增长：$_s1 → $_s2"
 
 printf '\n================ 结果：PASS=%s FAIL=%s ================\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] && exit 0

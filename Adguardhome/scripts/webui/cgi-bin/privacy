@@ -64,12 +64,12 @@ state_write() {
 # ---- AGH 面板 API（sb / parental 引擎在 fork 内，开关只能走原生接口）----
 AGH_API="http://127.0.0.1:40251/control"
 agh_set() { # $1=safebrowsing|parental  $2=enable|disable
-    curl -s -o /dev/null -m 4 -u "root:root" -X POST "$AGH_API/$1/$2" 2>/dev/null \
-      || wget -q -O /dev/null --timeout=4 --user=root --password=root --method=POST "$AGH_API/$1/$2" 2>/dev/null
+    curl -s -o /dev/null -m 2 -u "root:root" -X POST "$AGH_API/$1/$2" 2>/dev/null \
+      || wget -q -O /dev/null --timeout=2 --user=root --password=root --method=POST "$AGH_API/$1/$2" 2>/dev/null
 }
 
 agh_status() { # $1=safebrowsing|parental  -> 1/0，不可达时输出空（调用方沿用 conf 值）
-    _v=$(curl -s -m 4 -u "root:root" "$AGH_API/$1/status" 2>/dev/null | grep -o '"enabled":[a-z]*' | grep -o 'true\|false')
+    _v=$(curl -s -m 2 -u "root:root" "$AGH_API/$1/status" 2>/dev/null | grep -o '"enabled":[a-z]*' | grep -o 'true\|false')
     case "$_v" in
         true)  echo 1 ;;
         false) echo 0 ;;
@@ -103,6 +103,10 @@ refresh_state() {
     state_write
 }
 
+# mksh 的 printf 不认 `printf -- "..."`（会把 -- 和后续 -A 当选项解析，输出一堆破折号），
+# 统一用 %s 垫一步，任何 ROM 的 sh 都吃这一套。
+P() { printf '%s\n' "$1"; }
+
 ipt() { iptables -w 2 "$@" 2>/dev/null || iptables "$@" 2>/dev/null; }
 ipt6() { ip6tables -w 2 "$@" 2>/dev/null || ip6tables "$@" 2>/dev/null; }
 
@@ -125,54 +129,92 @@ apply() {
         return 0
     fi
 
-    ipt -N $STAGE 2>/dev/null
+    # 规则一次性灌进暂存链：原来 13 条 `iptables -A` 就是 13 次 fork，
+    # 每次都要拿 xtables 锁（锁被守护/AGH 占着时要等 30~100ms），实测 POST 3.0s。
+    # 改成「先 -F 暂存链，再用 iptables-restore --noflush 一次灌完」，v4/v6 各一次。
     ipt -F $STAGE 2>/dev/null
-    ipt -A $STAGE -o lo -j RETURN 2>/dev/null
-    ipt -A $STAGE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null
-    # 防 DNS 泄露（mDNS / SSDP / NetBIOS 探针外发）
-    [ "$DNS" = "1" ] && ipt -A $STAGE -p udp -m multiport --dports 5353,1900,137 -j DROP 2>/dev/null
-    # 防 VPN/IP 泄露（STUN/TURN 协商）
-    if [ "$VPN" = "1" ] || [ "$IP" = "1" ]; then
-        ipt -A $STAGE -p udp -m multiport --dports 3478,3479,5349,5350 -j DROP 2>/dev/null
-        ipt -A $STAGE -p tcp -m multiport --dports 3478,3479,5349,5350 -j DROP 2>/dev/null
+    {
+        printf '*filter\n:%s - [0:0]\n' "$STAGE"
+        P "-A $STAGE -o lo -j RETURN"
+        P "-A $STAGE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+        # 防 DNS 泄露（mDNS / SSDP / NetBIOS 探针外发）
+        [ "$DNS" = "1" ] && P "-A $STAGE -p udp -m multiport --dports 5353,1900,137 -j DROP"
+        # 防 VPN/IP 泄露（STUN/TURN 协商）
+        if [ "$VPN" = "1" ] || [ "$IP" = "1" ]; then
+            P "-A $STAGE -p udp -m multiport --dports 3478,3479,5349,5350 -j DROP"
+            P "-A $STAGE -p tcp -m multiport --dports 3478,3479,5349,5350 -j DROP"
+        fi
+        # Teredo / 6to4 隧道承载（IPv4 承载协议 41）
+        [ "$VPN" = "1" ] && P "-A $STAGE -p 41 -j DROP"
+        [ "$NTP" = "1" ] && P "-A $STAGE -p udp --dport 123 -j DROP"
+        [ "$DHCP" = "1" ] && P "-A $STAGE -p udp --dport 67 -j DROP"
+        if [ "$SMB" = "1" ]; then
+            P "-A $STAGE -p udp -m multiport --dports 137,139,445 -j DROP"
+            P "-A $STAGE -p tcp -m multiport --dports 137,139,445 -j DROP"
+        fi
+        [ "$TCP" = "1" ] && P "-A $STAGE -p tcp -m multiport --dports 23,25,110,143 -j DROP"
+        if [ "$SNMP" = "1" ]; then
+            P "-A $STAGE -p udp -m multiport --dports 161,162 -j DROP"
+            P "-A $STAGE -p tcp -m multiport --dports 161,162 -j DROP"
+        fi
+        printf 'COMMIT\n'
+    } | iptables-restore --noflush -w 2 >/dev/null 2>&1
+    # restore 不可用时（个别 ROM 没有该 applet）退回逐条：
+    if ! ipt -C $STAGE -o lo -j RETURN 2>/dev/null; then
+        ipt -N $STAGE 2>/dev/null
+        ipt -A $STAGE -o lo -j RETURN 2>/dev/null
+        ipt -A $STAGE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null
+        [ "$DNS" = "1" ] && ipt -A $STAGE -p udp -m multiport --dports 5353,1900,137 -j DROP 2>/dev/null
+        if [ "$VPN" = "1" ] || [ "$IP" = "1" ]; then
+            ipt -A $STAGE -p udp -m multiport --dports 3478,3479,5349,5350 -j DROP 2>/dev/null
+            ipt -A $STAGE -p tcp -m multiport --dports 3478,3479,5349,5350 -j DROP 2>/dev/null
+        fi
+        [ "$VPN" = "1" ] && ipt -A $STAGE -p 41 -j DROP 2>/dev/null
+        [ "$NTP" = "1" ] && ipt -A $STAGE -p udp --dport 123 -j DROP 2>/dev/null
+        [ "$DHCP" = "1" ] && ipt -A $STAGE -p udp --dport 67 -j DROP 2>/dev/null
+        if [ "$SMB" = "1" ]; then
+            ipt -A $STAGE -p udp -m multiport --dports 137,139,445 -j DROP 2>/dev/null
+            ipt -A $STAGE -p tcp -m multiport --dports 137,139,445 -j DROP 2>/dev/null
+        fi
+        [ "$TCP" = "1" ] && ipt -A $STAGE -p tcp -m multiport --dports 23,25,110,143 -j DROP 2>/dev/null
+        if [ "$SNMP" = "1" ]; then
+            ipt -A $STAGE -p udp -m multiport --dports 161,162 -j DROP 2>/dev/null
+            ipt -A $STAGE -p tcp -m multiport --dports 161,162 -j DROP 2>/dev/null
+        fi
     fi
-    # Teredo / 6to4 隧道承载（IPv4 承载协议 41）
-    [ "$VPN" = "1" ] && ipt -A $STAGE -p 41 -j DROP 2>/dev/null
-    [ "$NTP" = "1" ] && ipt -A $STAGE -p udp --dport 123 -j DROP 2>/dev/null
-    [ "$DHCP" = "1" ] && ipt -A $STAGE -p udp --dport 67 -j DROP 2>/dev/null
-    [ "$SMB" = "1" ] && {
-        ipt -A $STAGE -p udp -m multiport --dports 137,139,445 -j DROP 2>/dev/null
-        ipt -A $STAGE -p tcp -m multiport --dports 137,139,445 -j DROP 2>/dev/null
-    }
-    [ "$TCP" = "1" ] && ipt -A $STAGE -p tcp -m multiport --dports 23,25,110,143 -j DROP 2>/dev/null
-    [ "$SNMP" = "1" ] && {
-        ipt -A $STAGE -p udp -m multiport --dports 161,162 -j DROP 2>/dev/null
-        ipt -A $STAGE -p tcp -m multiport --dports 161,162 -j DROP 2>/dev/null
-    }
     swap_in ipt
 
     # IPv6 面（同样的口径，:137 在 v6 上是 NetBIOS 变体，一并挡）
-    ipt6 -N $STAGE 2>/dev/null
     ipt6 -F $STAGE 2>/dev/null
-    ipt6 -A $STAGE -o lo -j RETURN 2>/dev/null
-    ipt6 -A $STAGE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null
-    [ "$DNS" = "1" ] && ipt6 -A $STAGE -p udp -m multiport --dports 5353,1900,137 -j DROP 2>/dev/null
-    if [ "$VPN" = "1" ] || [ "$IP" = "1" ]; then
-        ipt6 -A $STAGE -p udp -m multiport --dports 3478,3479,5349,5350 -j DROP 2>/dev/null
-        ipt6 -A $STAGE -p tcp -m multiport --dports 3478,3479,5349,5350 -j DROP 2>/dev/null
+    {
+        printf '*filter\n:%s - [0:0]\n' "$STAGE"
+        P "-A $STAGE -o lo -j RETURN"
+        P "-A $STAGE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+        [ "$DNS" = "1" ] && P "-A $STAGE -p udp -m multiport --dports 5353,1900,137 -j DROP"
+        if [ "$VPN" = "1" ] || [ "$IP" = "1" ]; then
+            P "-A $STAGE -p udp -m multiport --dports 3478,3479,5349,5350 -j DROP"
+            P "-A $STAGE -p tcp -m multiport --dports 3478,3479,5349,5350 -j DROP"
+        fi
+        [ "$VPN" = "1" ] && P "-A $STAGE -p udp --dport 3544 -j DROP"
+        [ "$NTP" = "1" ] && P "-A $STAGE -p udp --dport 123 -j DROP"
+        [ "$DHCP" = "1" ] && P "-A $STAGE -p udp --dport 67 -j DROP"
+        if [ "$SMB" = "1" ]; then
+            P "-A $STAGE -p udp -m multiport --dports 137,139,445 -j DROP"
+            P "-A $STAGE -p tcp -m multiport --dports 137,139,445 -j DROP"
+        fi
+        [ "$TCP" = "1" ] && P "-A $STAGE -p tcp -m multiport --dports 23,25,110,143 -j DROP"
+        if [ "$SNMP" = "1" ]; then
+            P "-A $STAGE -p udp -m multiport --dports 161,162 -j DROP"
+            P "-A $STAGE -p tcp -m multiport --dports 161,162 -j DROP"
+        fi
+        printf 'COMMIT\n'
+    } | ip6tables-restore --noflush -w 2 >/dev/null 2>&1
+    if ! ipt6 -C $STAGE -o lo -j RETURN 2>/dev/null; then
+        ipt6 -N $STAGE 2>/dev/null
+        ipt6 -A $STAGE -o lo -j RETURN 2>/dev/null
+        ipt6 -A $STAGE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null
+        [ "$DNS" = "1" ] && ipt6 -A $STAGE -p udp -m multiport --dports 5353,1900,137 -j DROP 2>/dev/null
     fi
-    [ "$VPN" = "1" ] && ipt6 -A $STAGE -p udp --dport 3544 -j DROP 2>/dev/null
-    [ "$NTP" = "1" ] && ipt6 -A $STAGE -p udp --dport 123 -j DROP 2>/dev/null
-    [ "$DHCP" = "1" ] && ipt6 -A $STAGE -p udp --dport 67 -j DROP 2>/dev/null
-    [ "$SMB" = "1" ] && {
-        ipt6 -A $STAGE -p udp -m multiport --dports 137,139,445 -j DROP 2>/dev/null
-        ipt6 -A $STAGE -p tcp -m multiport --dports 137,139,445 -j DROP 2>/dev/null
-    }
-    [ "$TCP" = "1" ] && ipt6 -A $STAGE -p tcp -m multiport --dports 23,25,110,143 -j DROP 2>/dev/null
-    [ "$SNMP" = "1" ] && {
-        ipt6 -A $STAGE -p udp -m multiport --dports 161,162 -j DROP 2>/dev/null
-        ipt6 -A $STAGE -p tcp -m multiport --dports 161,162 -j DROP 2>/dev/null
-    }
     swap_in ipt6
 
     printf '%s' "$_sig" > "$STAMP" 2>/dev/null
@@ -192,6 +234,19 @@ case "$1" in
         ;;
 esac
 
+# 首屏内联态：privacy.html 在 <head> 里同步引这个（?embed=1），
+# 页面第一次渲染就拿真值，不再「先画默认关闭 / 再翻成开启」。
+case "$QUERY_STRING" in
+    *embed=1*)
+        load_conf
+        printf 'Content-Type: text/javascript; charset=utf-8\r\n'
+        printf 'Cache-Control: no-store, no-cache, must-revalidate\r\n\r\n'
+        printf 'window.__AGH_PRIV={"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s};\n' \
+            "$DNS" "$VPN" "$IP" "$SB" "$PAR" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP"
+        exit 0
+        ;;
+esac
+
 # 诊断记录（保留原行为）
 case "$QUERY_STRING" in
     *diag=*) echo "$(date +%s) $QUERY_STRING" >> /data/adb/agh/privacy_diag.log 2>/dev/null ;;
@@ -207,6 +262,10 @@ case "$REQUEST_METHOD" in
             body=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
         fi
         load_conf
+        # 记住旧值：sb / parental 的开关只在 AGH 里生效，值是「没变」时再打一次
+        # AGH API 纯粹是白等 —— 真机实测每次 POST 3.0s，两次 curl 各 1s+。
+        OLD_SB=$SB
+        OLD_PAR=$PAR
         # 一次 tr/sed 全部取值（旧版 10 条管道）
         _pv=$(printf '%s' "$body" | tr '&' '\n' | awk -F= '
             { k=$1; v=$2; if (v=="0"||v=="1") printf "%s=%s\n", toupper(k), v }')
@@ -226,8 +285,13 @@ case "$REQUEST_METHOD" in
         if [ "$PAR" = "1" ] && ! sb_upstream_ok; then PAR=0; PAR_BLOCKED=1; fi
         save_conf
         apply
-        [ "$SB" = "1" ] && agh_set safebrowsing enable || agh_set safebrowsing disable
-        [ "$PAR" = "1" ] && agh_set parental enable || agh_set parental disable
+        # 只有值变化（或被 blocked 降级）才动 AGH 原生接口
+        if [ "$SB" != "$OLD_SB" ] || [ "$SB_BLOCKED" = "1" ]; then
+            [ "$SB" = "1" ] && agh_set safebrowsing enable || agh_set safebrowsing disable
+        fi
+        if [ "$PAR" != "$OLD_PAR" ] || [ "$PAR_BLOCKED" = "1" ]; then
+            [ "$PAR" = "1" ] && agh_set parental enable || agh_set parental disable
+        fi
         state_write
         cors
         printf '{"dns":%s,"vpn":%s,"ip":%s,"sb":%s,"par":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"sb_blocked":%s,"par_blocked":%s,"applied":1}\n' \

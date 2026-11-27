@@ -1023,6 +1023,10 @@ _certs_sh="$SCRIPT_DIR/certs_install.sh"
 # 改写脚本运行时：aghmitm（用模块内置 MITM CA 做 TLS 解密 + URL 重写）
 # 建 /data/adb/agh/mitm_on 后开机自启，监听 127.0.0.1:8899
 if [ -f "$AGH_DIR/mitm_on" ] && [ -x "$BIN_DIR/aghmitm" ]; then
+    # 与守护循环里的 mitm_proc_guard 共用一把启动锁，避免开机同时起两个（抢 8899）
+    _ml="$AGH_DIR/.mitm.start.lock"
+    if mkdir "$_ml" 2>/dev/null; then
+    date +%s > "$_ml/ts" 2>/dev/null
     if ! pgrep -f "$BIN_DIR/aghmitm" >/dev/null 2>&1; then
         _AGHD=$(awk '/^dns:/{f=1} f&&/^[[:space:]]+port:/{print $2; exit}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null)
         case "$_AGHD" in ''|*[!0-9]*)
@@ -1031,6 +1035,8 @@ if [ -f "$AGH_DIR/mitm_on" ] && [ -x "$BIN_DIR/aghmitm" ]; then
         case "$_AGHD" in ''|*[!0-9]*) _AGHD=$(grep -oE '^redir_port=[0-9]+' "$AGH_DIR/scripts/config.prop" 2>/dev/null | cut -d= -f2) ;; esac
         setsid "$BIN_DIR/aghmitm" -listen 127.0.0.1:8899 -rules "$AGH_DIR/scripts/rewrite" -dns "127.0.0.1:${_AGHD:-5591}" >>"$AGH_DIR/mitm.log" 2>&1 &
 fi
+    rm -rf "$_ml" 2>/dev/null
+    fi
 fi
 _privacy_cgi="$SCRIPT_DIR/webui/cgi-bin/privacy"
 if [ -f "$_privacy_cgi" ]; then

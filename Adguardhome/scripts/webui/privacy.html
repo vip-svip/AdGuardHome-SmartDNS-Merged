@@ -33,6 +33,7 @@ h2{font-size:15px;margin:26px 0 10px}
 .msg.err{color:#e06c75}
 .msg.warn{color:var(--warn)}
 </style>
+<script src="/cgi-bin/privacy?embed=1"></script>
 </head>
 <body>
 <div class="wrap">
@@ -75,17 +76,27 @@ function msg(txt, cls){ var m=$('msg'); m.className='msg'+(cls?(' '+cls):''); m.
 
 function paint(){
   var box = $('rows');
-  box.innerHTML = ITEMS.map(function(it){
-    var v = state ? (state[it.k]|0) : null;
-    var cls, label, dis = '';
-    if (busy[it.k]) { cls='busy'; label='应用中…'; dis=' disabled'; }
-    else if (v === null) { cls='off'; label='读取中'; dis=' disabled'; }
-    else { cls = v ? 'on' : 'off'; label = v ? '已开启' : '已关闭'; }
-    return '<div class="row"><div><div class="t">'+it.t+'</div><div class="d">'+it.d+'</div></div>'+
-      '<div class="c"><button class="sw '+cls+'" data-k="'+it.k+'"'+dis+'>'+label+'</button></div></div>';
-  }).join('');
+  // 结构只建一次；之后只改按钮的 class / 文案 / disabled，
+  // 不再整块 innerHTML 重建（重建会闪一下，是「开关自己关掉又打开」的来源之一）
+  if (box.children.length !== ITEMS.length) {
+    box.innerHTML = ITEMS.map(function(it){
+      return '<div class="row"><div><div class="t">'+it.t+'</div><div class="d">'+it.d+'</div></div>'+
+        '<div class="c"><button class="sw off" data-k="'+it.k+'" disabled>读取中</button></div></div>';
+    }).join('');
+    Array.prototype.forEach.call(box.querySelectorAll('button.sw'), function(b){
+      b.onclick = function(){ if(!b.disabled) toggle(b.getAttribute('data-k')); };
+    });
+  }
   Array.prototype.forEach.call(box.querySelectorAll('button.sw'), function(b){
-    b.onclick = function(){ if(!b.disabled) toggle(b.getAttribute('data-k')); };
+    var k = b.getAttribute('data-k');
+    var v = state ? (state[k]|0) : null;
+    var cls, label, dis = false;
+    if (busy[k]) { cls='busy'; label='应用中…'; dis=true; }
+    else if (v === null) { cls='off'; label='读取中'; dis=true; }
+    else { cls = v ? 'on' : 'off'; label = v ? '已开启' : '已关闭'; }
+    if (b.className !== 'sw '+cls) b.className = 'sw '+cls;
+    if (b.textContent !== label) b.textContent = label;
+    if (b.disabled !== dis) b.disabled = dis;
   });
 }
 
@@ -99,8 +110,21 @@ function absorb(j){
   paint();
 }
 
-// 首屏：有本地缓存先按缓存画（按钮禁用、标记同步中），拿到真值再解锁
+// 首屏：服务器把真值内联进来了（<head> 里 sync 引的 ?embed=1），
+// 直接按真值画，不出现「先全关 → 再逐个翻开」的闪烁。
+// 内联缺失（CGI 挂了）才退回 localStorage 缓存 / 未知态。
+function norm(j){
+  var s = {};
+  KEYS.forEach(function(k){ s[k] = (j[k]|0) ? 1 : 0; });
+  return s;
+}
 (function boot(){
+  if (window.__AGH_PRIV && typeof window.__AGH_PRIV === 'object') {
+    state = norm(window.__AGH_PRIV);
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify(state)); } catch(e){}
+    paint();
+    return;
+  }
   var cached = null;
   try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch(e){}
   if (cached && typeof cached === 'object') { state = cached; paint(); msg('正在与守护进程核对状态…'); }

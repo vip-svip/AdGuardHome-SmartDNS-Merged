@@ -1234,6 +1234,41 @@ rotate_logs() {
     return 0
 }
 
+# aghmitm 进程守护（2026-11-27 真机实证：kill -9 之后 31 秒都没人拉起）
+# 后果不是「少个日志」：
+#   ① mitm_uids.txt 里的 uid 443 被 REDIRECT 到 127.0.0.1:8899，没人 listen → 那些应用直接连不上；
+#   ② SNI 的 NFQUEUE 只剩 --queue-bypass，443 全部直通 → SNI/QUIC 拦截静默失效（日志照样安静）。
+# 这里每 5 秒看一次，不在就按 service.sh 的同一套参数拉起来；用 mkdir 锁避免与开机路径同时起两个。
+mitm_proc_guard() {
+    [ -f "$AGH_DIR/mitm_on" ] || return 0
+    [ -x "$BIN_DIR/aghmitm" ] || return 0
+    pgrep -f "$BIN_DIR/aghmitm" >/dev/null 2>&1 && return 0
+    _ml="$AGH_DIR/.mitm.start.lock"
+    if ! mkdir "$_ml" 2>/dev/null; then
+        # 别的进程正在拉（开机路径或上一轮守护），交给它；锁超过 30 秒还在就当持锁进程
+        # 已死强拆，下一轮再拉（绝不因为一个残留锁让 aghmitm 永远起不来）。
+        _lts=$(cat "$_ml/ts" 2>/dev/null)
+        _now=$(date +%s)
+        if [ -n "$_lts" ] && [ $(( _now - _lts )) -gt 30 ]; then
+            rm -rf "$_ml"
+        fi
+        return 0
+    fi
+    date +%s > "$_ml/ts" 2>/dev/null
+    if pgrep -f "$BIN_DIR/aghmitm" >/dev/null 2>&1; then
+        rmdir "$_ml" 2>/dev/null; rm -rf "$_ml"; return 0
+    fi
+    _md=$(awk '/^dns:/{f=1} f&&/^[[:space:]]+port:/{print $2; exit}' "$AGH_DIR/bin/AdGuardHome.yaml" 2>/dev/null)
+    case "$_md" in ''|*[!0-9]*)
+        _md=$(grep -oE '^redir_port=[0-9]+' "$AGH_DIR/scripts/config.prop" 2>/dev/null | cut -d= -f2) ;;
+    esac
+    setsid "$BIN_DIR/aghmitm" -listen 127.0.0.1:8899 -rules "$AGH_DIR/scripts/rewrite" -dns "127.0.0.1:${_md:-5591}" >>"$AGH_DIR/mitm.log" 2>&1 &
+    echo "$(date +%s)" >> "$AGH_DIR/.mitm_restarts" 2>/dev/null
+    log_vpn "[WARN] aghmitm 不在，已自动拉起（listen 8899，dns 127.0.0.1:${_md:-5591}）"
+    rmdir "$_ml" 2>/dev/null; rm -rf "$_ml" 2>/dev/null
+    return 0
+}
+
 while true; do
     date +%s > "$AGH_DIR/.daemon_hb" 2>/dev/null
     echo -1000 > /proc/$$/oom_score_adj 2>/dev/null
@@ -1354,6 +1389,7 @@ while true; do
     # 的日志，SNI 计数器每分钟一条）都只写不轮转，长开机几天就上 MB。
     # 每 12 轮（约 60 秒）查一次，超过 2MB 就「保留尾部 256KB + 原地截断」——
     # 原地 cat 写同一 inode，进程的 O_APPEND fd 继续追加，不需要重启任何进程。
+    mitm_proc_guard
     if [ $(( ${_tick:-0} % 12 )) -eq 0 ]; then
         rotate_logs
     fi
