@@ -33,7 +33,14 @@ h2{font-size:15px;margin:26px 0 10px}
 .msg.err{color:#e06c75}
 .msg.warn{color:var(--warn)}
 </style>
-<script src="/cgi-bin/privacy?embed=1"></script>
+<!-- 首屏真值直接静态内联：这一行由 cgi-bin/privacy 在每次状态变化时原地改写。
+     不再用 <script src="?embed=1"> 二次请求——静态文件 30ms 就到，页面第一帧
+     就是最终值；浏览器来不及把上一帧（可能是旧的「已关闭」）继续留在屏幕上，
+     于是不会再出现「关一下再打开」。 -->
+<meta http-equiv="Cache-Control" content="no-store">
+<script>
+window.__AGH_PRIV={"dns":1,"vpn":1,"ip":1,"ntp":1,"dhcp":1,"smb":1,"tcp":1,"snmp":1};
+</script>
 </head>
 <body>
 <div class="wrap">
@@ -105,8 +112,8 @@ function absorb(j){
   paint();
 }
 
-// 首屏：服务器把真值内联进来了（<head> 里 sync 引的 ?embed=1，实测 130~156ms 必达），
-// 直接按真值画，不出现「先全关 → 再逐个翻开」的闪烁。
+// 首屏：真值已经静态内联在上面的 <head> 里（cgi-bin/privacy 每次写完状态就改写那一行），
+// 所以第一帧就是最终值，不出现「先全关 → 再逐个翻开」，也不需要额外一次 CGI 请求。
 // 缺失的键记成 null（＝未知），paint 时显示「读取中」而不是「已关闭」：
 // 宁可先显示「读取中」，也不要先画成关、再翻成开——那一下翻转就是用户看到的闪烁。
 //
@@ -161,7 +168,10 @@ function toggle(k){
     .catch(function(){ busy[k]=0; paint(); msg('写入失败，状态已回退', 'err'); });
 }
 
-load();
+// 内联真值命中：首帧已经画好，900ms 后再往后核对一次（不再让首屏等任何 CGI）；
+// 内联缺失（文件被截断 / cgi 没写进去）才立刻 GET 补。
+if (window.__AGH_PRIV && typeof window.__AGH_PRIV === 'object') setTimeout(load, 900);
+else load();
 // 切回前台再核对一次（后台可能被守护/开机脚本改过）
 document.addEventListener('visibilitychange', function(){ if(!document.hidden) load(); });
 </script>

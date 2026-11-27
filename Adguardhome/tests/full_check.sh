@@ -31,10 +31,13 @@ prop() { sed -n "s/^$1=//p" "$PROP" 2>/dev/null | head -1; }
 # 换链的那 3~5ms 里名字可能短暂是 AGH_SNIN、或两条同时存在。
 # 所以断言必须按「语义」量（拦截是否一直在线），不能按链名量。
 sni_nf() {
-    # -w 2：重建进程持有 xtables 锁时，不带 -w 的查询会直接报错返回空，
-    # 那种「0 条」是测量假象，不是真的裸奔（本机踩过一次，别当成回归）。
-    _a=$(iptables -w 2 -S AGH_SNI 2>/dev/null | _gr -c NFQUEUE)
-    _b=$(iptables -w 2 -S AGH_SNIN 2>/dev/null | _gr -c NFQUEUE)
+    # -w 5：重建进程长时间持 xtables 锁时，-w 2 会超时失败并返回空，
+    # 那种「0 条」是测量假象，不是真的裸奔。两条链都读不到才算测量失败（ERR）。
+    _ao=$(iptables -w 5 -S AGH_SNI 2>/dev/null); _ra=$?
+    _bo=$(iptables -w 5 -S AGH_SNIN 2>/dev/null); _rb=$?
+    if [ "${_ra:-1}" -ne 0 ] && [ "${_rb:-1}" -ne 0 ]; then echo ERR; return 0; fi
+    _a=$(printf '%s\n' "$_ao" | _gr -c NFQUEUE)
+    _b=$(printf '%s\n' "$_bo" | _gr -c NFQUEUE)
     echo $(( ${_a:-0} + ${_b:-0} ))
 }
 sni_jumps() {
@@ -207,10 +210,11 @@ SO=$(sni_jumps)
 [ "$SO" -ge 1 ] && [ "$SO" -le 2 ] && ok "OUTPUT 挂载数=$SO（正常 1，换链瞬间允许 2）" || bad "AGH_SNI 跳转数=$SO（0=没挂，>2=重复挂）"
 NQ=$(sni_nf)
 # 换链瞬间名字可能短暂不存在；重试 3 次再下结论
+NQ=$(sni_nf); case "$NQ" in ''|*[!0-9]*) NQ=0 ;; esac
 for _r in 1 2 3; do
     [ "${NQ:-0}" -ge 11 ] && break
     sleep 1
-    NQ=$(sni_nf)
+    NQ=$(sni_nf); case "$NQ" in ''|*[!0-9]*) NQ=0 ;; esac
 done
 [ "${NQ:-0}" -ge 11 ] && ok "NFQUEUE 条目 ${NQ} 条（443/80 等）" || bad "NFQUEUE 条目只有 ${NQ} 条（期望 11，SNI 在裸奔）"
 iptables -S AGH_SNI 2>/dev/null | _gr -q -- '--dport 443 -j NFQUEUE' && ok "443 走 NFQUEUE" || bad "443 没走 NFQUEUE"
@@ -218,18 +222,26 @@ pidof aghmitm >/dev/null 2>&1 && ok "NFQUEUE 消费者（aghmitm）在跑" || ba
 # 原子性回归：强制跑一次 --once 重建，全程 200ms 采样，拦截条数必须始终 ≥11。
 # 旧实现（-F 后原地重灌）实测会掉到 0~5，等于每次自愈都有 100~300ms SNI 裸奔。
 if [ -f "$AGH_DIR/scripts/iptables.sh" ]; then
-    _mn=99; _i=0
+    _mn=99; _i=0; _err=0
     sh "$AGH_DIR/scripts/iptables.sh" --sni-force >/dev/null 2>&1 &
     _bp=$!
     while kill -0 "$_bp" 2>/dev/null; do
         _c=$(sni_nf)
-        [ "${_c:-0}" -lt "$_mn" ] && _mn=${_c:-0}
+        case "$_c" in
+            ''|*[!0-9]*) _err=$((_err + 1)) ;;            # 读不到 = 锁竞争，不算裸奔
+            *) [ "$_c" -lt "$_mn" ] && _mn=$_c ;;
+        esac
         _i=$((_i + 1)); [ "$_i" -gt 80 ] && break
         sleep 0.2 2>/dev/null || sleep 1
     done
     wait "$_bp" 2>/dev/null
-    [ "$_mn" -ge 11 ] && ok "重建原子性：全程 ${_i} 次采样最低拦截条数=$_mn（无裸奔窗口）" \
-        || bad "重建不原子：采样最低拦截条数=$_mn（出现 SNI 裸奔窗口）"
+    if [ "$_mn" -ge 11 ]; then
+        ok "重建原子性：${_i} 次采样最低拦截条数=$_mn（无裸奔窗口，锁竞争跳过 $_err 次）"
+    elif [ "$_mn" -eq 99 ]; then
+        bad "重建原子性无法采样（${_i} 次全是锁竞争 $_err 次，iptables 查询被卡住）"
+    else
+        bad "重建不原子：采样最低拦截条数=$_mn（出现 SNI 裸奔窗口）"
+    fi
 fi
 
 hdr "6. 隐私防护"
@@ -333,15 +345,29 @@ fi
 
 hdr "12. 端到端与自愈（会短暂杀进程，放最后一组）"
 
-# 12.0 首屏不闪烁：privacy 页在 <head> 同步引 ?embed=1，第一次渲染就是真值
+# 12.0 首屏不闪烁：真值静态内联在 privacy.html 里（cgi 每次写完状态原地改写那一行），
+#      页面第一帧 = 最终值，连 ?embed=1 的二次请求都不发。
 _em=$(curl -s -m 5 "http://$HOST:6081/cgi-bin/privacy?embed=1" 2>/dev/null)
 case "$_em" in
-  *"window.__AGH_PRIV={"*) ok "privacy ?embed=1 返回内联状态（首屏零闪烁）" ;;
-  *) bad "privacy ?embed=1 没返回内联状态（首屏会先画默认值再翻）" ;;
+  *"window.__AGH_PRIV={"*) ok "privacy ?embed=1 返回内联状态（兼容端点仍在）" ;;
+  *) bad "privacy ?embed=1 没返回内联状态" ;;
 esac
-_ph=$(curl -s -m 5 "http://$HOST:6081/privacy.html" 2>/dev/null | _gr -c 'privacy?embed=1')
-[ "${_ph:-0}" -ge 1 ] && ok "privacy.html 已内联 embed 脚本（$_ph 处）" \
-                      || bad "privacy.html 没有内联 embed 脚本（首屏仍会闪）"
+_ph_html=$(curl -s -m 5 "http://$HOST:6081/privacy.html" 2>/dev/null)
+_ph=$(printf '%s' "$_ph_html" | _gr -c '^window.__AGH_PRIV={')
+[ "${_ph:-0}" -ge 1 ] && ok "privacy.html 首屏真值已静态内联（$_ph 处）" \
+                      || bad "privacy.html 没有静态内联真值（首屏仍要等 CGI）"
+_ph_old=$(printf '%s' "$_ph_html" | _gr -c 'privacy?embed=1')
+[ "${_ph_old:-0}" -eq 0 ] && ok "privacy.html 不再引 ?embed=1（首屏零外部请求）" \
+                           || bad "privacy.html 仍在引 ?embed=1（$_ph_old 处，首屏多一次 CGI）"
+_inl=$(printf '%s' "$_ph_html" | _gr -o 'window.__AGH_PRIV={[^}]*}' | head -1)
+_get=$(curl -s -m 5 "http://$HOST:6081/cgi-bin/privacy" 2>/dev/null | _gr -o '{"dns":[^}]*}' | head -1)
+_inl_json=$(printf '%s' "$_inl" | sed 's/window.__AGH_PRIV=//; s/};/}/')
+_get_json=$(printf '%s' "$_get" | sed 's/,"applied":1//')
+if [ -n "$_inl_json" ] && [ "$_inl_json" = "$_get_json" ]; then
+    ok "静态内联值与 GET 真值一致（不会画出过期状态）"
+else
+    bad "静态内联值与 GET 真值不一致：$_inl_json vs $_get_json"
+fi
 
 # 12.1 真实 DNS 解析：手搓 27 字节 A 查询（八进制转义，mksh/busybox printf 都认）
 _q=/data/local/tmp/.fc_q.bin

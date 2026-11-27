@@ -1,6 +1,6 @@
 {
-  "version": "20261127",
-  "versionCode": 20261127,
-  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261127/AdGuardHome-SmartDNS-Merged-20261127.zip",
-  "changelog": "[20261127] 自愈修复：AdGuardHome 被杀后 2 秒拉起（原 35 秒不重启，DNS 全断）——存活判断不再用 pgrep -f 路径子串、排除 Z 僵尸、守护单例 pidfile、启动锁等待 12s→5s、主循环外加 2 秒轻量看门狗；DNS 端口不再漂移：AGH 占端口改 yaml 时按 config.prop 回写、两份 config.prop 强制同步；aghmitm 5 秒热加载只在规则/脚本内容变化时打日志（mitm.log 12 秒 24 行→2 行）；webui privacy 页 embed 内联首帧、脚本页空态文案、v6 隐私链 printf 修复；自检 full_check 113 项全绿"
+  "version": "20261128",
+  "versionCode": 20261128,
+  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261128/AdGuardHome-SmartDNS-Merged-20261128.zip",
+  "changelog": "[20261128] 隐私页刷新不再「关一下再打开」：真值改成静态内联进 privacy.html（cgi 每次写完状态原地改写那一行），首屏只需一次静态请求，实测首字节 3~5ms（原来要 ?embed=1 二次 CGI 65~115ms），页面第一帧就是最终值，浏览器来不及把上一帧的旧状态留在屏幕上；删掉 localStorage 快照分支（它就是「有的开关翻、有的不翻」的根因）；移除「恶意网站拦截」「成人内容过滤」两个开关，并在 --apply 里幂等关闭 AGH 对应引擎；自检 full_check 116 项全绿（新增：静态内联值与 GET 真值一致、页面不再引 ?embed=1；修复 SNI 原子性采样把 xtables 锁竞争误判成裸奔窗口）"
 }

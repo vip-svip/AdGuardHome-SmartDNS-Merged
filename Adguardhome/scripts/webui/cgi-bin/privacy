@@ -56,12 +56,31 @@ save_conf() {
         "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP" > "$CONF" 2>/dev/null
 }
 
+# 静态页面里的首屏真值行（cgi 在同目录的上一级）
+HTML="${0%/*}/../privacy.html"
+
+# 把当前状态原地写回 privacy.html 的 `window.__AGH_PRIV={...};` 那一行。
+# 作用：首屏不再需要 ?embed=1 的二次 CGI 请求（静态文件 30ms 级就到），
+# 页面第一帧即最终值 —— 浏览器没机会把上一帧（旧的「已关闭」）留在屏幕上。
+# 内容没变就不写（避免每次都刷新 mtime，打掉浏览器缓存的意义）。
+inline_write() {
+    [ -f "$HTML" ] || return 0
+    _il=$(printf 'window.__AGH_PRIV={"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s};' \
+        "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP")
+    [ "$(grep -m1 '^window.__AGH_PRIV=' "$HTML" 2>/dev/null)" = "$_il" ] && return 0
+    awk -v new="$_il" '/^window.__AGH_PRIV=/{print new; next} {print}' "$HTML" > "$HTML.tmp" 2>/dev/null \
+        && mv -f "$HTML.tmp" "$HTML" 2>/dev/null \
+        || rm -f "$HTML.tmp" 2>/dev/null
+    return 0
+}
+
 state_write() {
     _json=$(printf '{"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":1}' \
         "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP")
     printf '%s\n' "$_json" > "$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE" 2>/dev/null
     # 连同响应头一起落盘：GET 命中时整个响应只需一次 cat（~20ms）
     { cors; printf '%s\n' "$_json"; } > "$RESP.tmp" 2>/dev/null && mv -f "$RESP.tmp" "$RESP" 2>/dev/null
+    inline_write
 }
 
 # ---- AGH 原生引擎（safebrowsing / parental）已从隐私页移除 ----
