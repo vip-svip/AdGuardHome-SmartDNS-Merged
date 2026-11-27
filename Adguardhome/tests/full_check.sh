@@ -427,7 +427,7 @@ case "$_root" in
   *) bad "6081 根入口不是隐私页（/ 没返回跳转）" ;;
 esac
 case "$_pg" in
-  *20261129*) ok "privacy-page 构建号 20261129（可自证是新版）" ;;
+  *20261130*) ok "privacy-page 构建号 20261130（可自证是新版）" ;;
   *) bad "privacy-page 缺新构建号（无法判断浏览器吃的是哪版）" ;;
 esac
 
@@ -548,6 +548,21 @@ if [ -n "$_s1" ] && [ "$_s2" = "$_s3" ]; then
 else
     bad "规则行数在增长：$_s1 → $_s2 → $_s3（疑似泄漏）"
 fi
+
+# ============ 13. AGH 内嵌前端（40251 面板里的「隐私」页）============
+# 这一段是用户真正在看的那一页：它编译在 bin/AdGuardHome 里（SolidJS bundle，明文），
+# 不是 6081 的独立页面。两件事必须在二进制里改到位，否则用户永远看到「别的开关翻」。
+hdr "13. AGH 内嵌前端（40251「隐私」页）"
+_BIN=/data/adb/agh/bin/AdGuardHome
+_n1=$(LC_ALL=C grep -a -c 'ntp:!1,dhcp:!1' "$_BIN" 2>/dev/null)
+[ "${_n1:-0}" -eq 0 ] && ok "内嵌前端：旧首帧默认值已清零（8 开关不再翻）" \
+                       || bad "内嵌前端仍是旧默认值（$_n1 处，开关会翻）"
+_n2=$(LC_ALL=C grep -a -c 'ntp:!0,dhcp:!0,smb:!0,tcp:!0,snmp:!0' "$_BIN" 2>/dev/null)
+[ "${_n2:-0}" -ge 1 ] && ok "内嵌前端：新首帧默认值在位" || bad "内嵌前端缺新默认值"
+_n3=$(LC_ALL=C grep -a -c 'key:"sb",title:' "$_BIN" 2>/dev/null)
+[ "${_n3:-0}" -eq 0 ] && ok "内嵌前端：恶意网站拦截项已删除" || bad "内嵌前端仍有 sb 开关项"
+_n4=$(LC_ALL=C grep -a -c 'key:"par",title:' "$_BIN" 2>/dev/null)
+[ "${_n4:-0}" -eq 0 ] && ok "内嵌前端：成人内容过滤项已删除" || bad "内嵌前端仍有 par 开关项"
 
 printf '\n================ 结果：PASS=%s FAIL=%s ================\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] && exit 0
