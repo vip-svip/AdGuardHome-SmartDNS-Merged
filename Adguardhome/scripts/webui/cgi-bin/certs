@@ -1,11 +1,14 @@
 #!/system/bin/sh
 # 证书状态 CGI：读取模块内置 CA 与系统信任库，输出 JSON
 #   GET /cgi-bin/certs
-# 返回：
-#   {"https":{...},"mitm":{...},"system_cacerts":"/system/etc/security/cacerts"}
+#   GET /cgi-bin/certs?download=https|mitm   直接输出 PEM
+#   GET /cgi-bin/certs?install=1             立即执行一次注入（前端「安装到系统」按钮）
+#   GET /cgi-bin/certs?verify=1              校验系统信任库现状
 MODDIR=/data/adb/modules/AdGuardHome
+[ -d "$MODDIR" ] || MODDIR=/data/adb/agh
 CERTDIR="$MODDIR/certs"
-SYS="$MODDIR/system/etc/security/cacerts"
+SYS=/system/etc/security/cacerts
+SNAP=/data/adb/agh/cacerts_orig
 
 cors() {
     printf 'Access-Control-Allow-Origin: *\r\n'
@@ -15,7 +18,65 @@ cors() {
     printf '\r\n'
 }
 
-# 证书下载：?download=https|mitm 直接吐 PEM（给其它设备导入用）
+jstr() { printf '%s' "$1" | tr -d '\r\n' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# ---- 从 PEM 里提取人类可读信息（无 openssl 时的兜底）----
+# 用 base64 解码 DER 后按 ASN.1 粗解析太脆弱；改用 certs/meta.txt + meta.json。
+# meta.txt 是模块构建时写入的，格式 name.field=value
+meta_get() { # $1=name $2=field
+    [ -f "$CERTDIR/meta.txt" ] || return 0
+    grep "^$1\.$2=" "$CERTDIR/meta.txt" 2>/dev/null | head -1 | cut -d= -f2-
+}
+
+# meta.json 兜底（"mitm": {"subject": "...", ...}）
+meta_json_get() { # $1=name $2=field
+    [ -f "$CERTDIR/meta.json" ] || return 0
+    tr -d '\n\r' < "$CERTDIR/meta.json" 2>/dev/null \
+        | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*{[^}]*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+        | head -1
+}
+
+get_field() { # $1=name $2=field $3=crt
+    _v=$(meta_get "$1" "$2")
+    [ -n "$_v" ] || _v=$(meta_json_get "$1" "$2")
+    if [ -z "$_v" ] && command -v openssl >/dev/null 2>&1 && [ -f "$3" ]; then
+        case "$2" in
+            subject) _v=$(openssl x509 -in "$3" -noout -subject 2>/dev/null | sed 's/^subject=//') ;;
+            issuer)  _v=$(openssl x509 -in "$3" -noout -issuer  2>/dev/null | sed 's/^issuer=//') ;;
+            expires) _v=$(openssl x509 -in "$3" -noout -enddate 2>/dev/null | sed 's/^notAfter=//') ;;
+            sha256)  _v=$(openssl x509 -in "$3" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//') ;;
+        esac
+    fi
+    # 最后兜底：直接从 PEM base64 里找 CN（能覆盖绝大多数自签 CA）
+    if [ -z "$_v" ] && [ -f "$3" ]; then
+        _v=$(tr -d '\n' < "$3" 2>/dev/null | sed -n 's/.*CN=\([A-Za-z0-9 ._-]*\).*/\1/p' | head -1)
+        [ "$2" = "subject" ] || _v=""
+    fi
+    printf '%s' "$_v"
+}
+
+one() {
+    _name="$1"; _file="$2"; _hash="$3"; _crt="$CERTDIR/$_file.crt"
+    _inst=0; _size=0
+    if [ -f "$_crt" ]; then
+        _size=$(wc -c < "$_crt" 2>/dev/null | tr -d ' ')
+        # 系统信任库里有就算已安装（overlay 或 tmpfs 注入都算）
+        [ -f "$SYS/$_hash.0" ] && _inst=1
+        # 再核一次模块 overlay 目录（尚未重启时这里是唯一可判断的位置）
+        [ -f "$MODDIR/system/etc/security/cacerts/$_hash.0" ] && _inst=$(( _inst + 1 ))
+        [ "$_inst" -gt 0 ] && _inst=1
+    fi
+    _subj=$(get_field "$_name" subject "$_crt")
+    _iss=$(get_field "$_name" issuer "$_crt")
+    _exp=$(get_field "$_name" expires "$_crt")
+    _fp=$(get_field "$_name" sha256 "$_crt")
+    printf '"%s":{"name":"%s","hash":"%s","installed":%d,"size":%s,"exists":%d,"subject":"%s","issuer":"%s","expires":"%s","sha256":"%s","module_path":"%s","system_path":"%s/%s.0"}' \
+        "$_name" "$_name" "$_hash" "$_inst" "$_size" "$([ -f "$_crt" ] && echo 1 || echo 0)" \
+        "$(jstr "$_subj")" "$(jstr "$_iss")" "$(jstr "$_exp")" "$(jstr "$_fp")" \
+        "$_crt" "$SYS" "$_hash"
+}
+
+# ---- 动作分支 ----
 case "$QUERY_STRING" in
     *download=*)
         _d=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*download=\([a-z]*\).*/\1/p')
@@ -34,47 +95,53 @@ case "$QUERY_STRING" in
         fi
         exit 0
         ;;
+    *install=*)
+        _ci="$MODDIR/scripts/certs_install.sh"
+        [ -f "$_ci" ] || _ci=/data/adb/agh/scripts/certs_install.sh
+        if [ -f "$_ci" ]; then
+            MODDIR="$MODDIR" sh "$_ci" >/dev/null 2>&1
+            _rc=$?
+        else
+            _rc=127
+        fi
+        cors
+        _now=$(ls "$SYS" 2>/dev/null | wc -l | tr -d ' ')
+        printf '{"ok":%s,"rc":%d,"system_count":%s}\n' \
+            "$([ "$_rc" = 0 ] && echo true || echo false)" "$_rc" "$_now"
+        exit 0
+        ;;
+    *verify=*)
+        cors
+        _now=$(ls "$SYS" 2>/dev/null | wc -l | tr -d ' ')
+        _base=0
+        [ -f "$SNAP/.count" ] && _base=$(cat "$SNAP/.count" 2>/dev/null | tr -d ' ')
+        case "$_base" in ''|*[!0-9]*) _base=0 ;; esac
+        _h1=0; _h2=0
+        [ -f "$SYS/2c637461.0" ] && _h1=1
+        [ -f "$SYS/e2b6a4fd.0" ] && _h2=1
+        _tmpfs=0
+        mountpoint -q "$SYS" 2>/dev/null && _tmpfs=1
+        printf '{"system_count":%s,"baseline":%s,"https_present":%d,"mitm_present":%d,"tmpfs":%d,"ok":%s}\n' \
+            "$_now" "$_base" "$_h1" "$_h2" "$_tmpfs" \
+            "$([ "$_now" -ge "$_base" ] && echo true || echo false)"
+        exit 0
+        ;;
 esac
+
 case "$REQUEST_METHOD" in
     OPTIONS) cors; exit 0 ;;
 esac
-
-jstr() { printf '%s' "$1" | tr -d '\r\n' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-
-one() {
-    _name="$1"; _file="$2"; _hash="$3"; _crt="$CERTDIR/$_file.crt"
-    _subj=""; _iss=""; _exp=""; _fp=""; _inst=0; _size=0
-    if [ -f "$_crt" ]; then
-        _size=$(wc -c < "$_crt" 2>/dev/null | tr -d ' ')
-        # 内置 meta.txt（模块生成时写入），设备没有 openssl 也能显示
-        _mt="$CERTDIR/meta.txt"
-        if [ -f "$_mt" ]; then
-            _subj=$(grep "^$_name.subject=" "$_mt" 2>/dev/null | head -1 | cut -d= -f2-)
-            _iss=$(grep "^$_name.issuer=" "$_mt" 2>/dev/null | head -1 | cut -d= -f2-)
-            _exp=$(grep "^$_name.expires=" "$_mt" 2>/dev/null | head -1 | cut -d= -f2-)
-            _fp=$(grep "^$_name.sha256=" "$_mt" 2>/dev/null | head -1 | cut -d= -f2-)
-        fi
-        if command -v openssl >/dev/null 2>&1; then
-            _subj=$(openssl x509 -in "$_crt" -noout -subject 2>/dev/null | sed 's/^subject=//')
-            _iss=$(openssl x509 -in "$_crt" -noout -issuer 2>/dev/null | sed 's/^issuer=//')
-            _exp=$(openssl x509 -in "$_crt" -noout -enddate 2>/dev/null | sed 's/^notAfter=//')
-            _fp=$(openssl x509 -in "$_crt" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//')
-        else
-            # 无 openssl 时用 busybox 兜底：至少给出可读性信息
-            [ -n "$_subj" ] || _subj=$(grep -m1 -o 'CN=[^,]*' "$_crt" 2>/dev/null)
-        fi
-        [ -f "$SYS/$_hash.0" ] && _inst=1
-        [ -f "/system/etc/security/cacerts/$_hash.0" ] && _inst=1
-    fi
-    printf '"%s":{"name":"%s","hash":"%s","installed":%d,"size":%s,"subject":"%s","issuer":"%s","expires":"%s","sha256":"%s","module_path":"%s","system_path":"/system/etc/security/cacerts/%s.0"}' \
-        "$_name" "$_name" "$_hash" "$_inst" "$_size" \
-        "$(jstr "$_subj")" "$(jstr "$_iss")" "$(jstr "$_exp")" "$(jstr "$_fp")" \
-        "$_crt" "$_hash"
-}
 
 cors
 printf '{'
 one "https" "https-ca" "2c637461"
 printf ','
 one "mitm" "mitm-ca" "e2b6a4fd"
-printf ',"system_cacerts":"/system/etc/security/cacerts","module_certs":"%s"}\n' "$CERTDIR"
+_now=$(ls "$SYS" 2>/dev/null | wc -l | tr -d ' ')
+_base=0
+[ -f "$SNAP/.count" ] && _base=$(cat "$SNAP/.count" 2>/dev/null | tr -d ' ')
+case "$_base" in ''|*[!0-9]*) _base=0 ;; esac
+_tmpfs=0
+mountpoint -q "$SYS" 2>/dev/null && _tmpfs=1
+printf ',"system_cacerts":"%s","module_certs":"%s","system_count":%s,"baseline":%s,"tmpfs":%d}\n' \
+    "$SYS" "$CERTDIR" "$_now" "$_base" "$_tmpfs"

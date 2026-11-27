@@ -9,11 +9,11 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
-	"context"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -367,7 +367,7 @@ func serveHTTP(w io.Writer, req *http.Request) bool {
 
 	// JS 脚本：$request / $done 可短路或改写
 	jsr := &jsResult{headers: map[string]string{}}
-	runScripts(full, req.Method, flatten(req.Header), "", jsr)
+	runScripts(full, req.Method, flatten(req.Header), "", jsr, "request")
 	if jsr.handled && (jsr.status > 0 || jsr.body != "" || jsr.url != "") {
 		st := jsr.status
 		if st == 0 {
@@ -396,9 +396,9 @@ func serveHTTP(w io.Writer, req *http.Request) bool {
 		}
 	}
 	tr := &http.Transport{
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
-		ForceAttemptHTTP2:   false,
-		DialContext:         dialer.DialContext,
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+		ForceAttemptHTTP2: false,
+		DialContext:       dialer.DialContext,
 	}
 	resp, err := tr.RoundTrip(outReq)
 	if err != nil {
@@ -410,20 +410,43 @@ func serveHTTP(w io.Writer, req *http.Request) bool {
 	}
 	defer resp.Body.Close()
 	hdr := resp.Header.Clone()
-	hdr.Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
+
+	// 响应阶段 JS（http-response 脚本）：把上游响应喂给 $response，$done({body}) 可改写
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	{
+		js2 := &jsResult{status: resp.StatusCode, headers: flatten(hdr), body: string(body)}
+		runScripts(full, req.Method, flatten(req.Header), "", js2, "response")
+		if js2.handled {
+			if js2.respStatus > 0 {
+				hdr.Set("x-agh-js-status", fmt.Sprintf("%d", js2.respStatus))
+			}
+			if js2.respHdr != nil {
+				for k, v := range js2.respHdr {
+					hdr.Set(k, v)
+				}
+			}
+			if js2.respBody != "" || js2.respStatus > 0 {
+				body = []byte(js2.respBody)
+				if js2.respStatus > 0 {
+					resp.StatusCode = js2.respStatus
+				}
+			}
+			log.Printf("JS-RESP %s status=%d len=%d", full, resp.StatusCode, len(body))
+		}
+	}
+	if haveBodyRule {
+		body = []byte(strings.ReplaceAll(string(body), bodyFrom, bodyTo))
+	}
+	if int64(len(body)) != resp.ContentLength {
+		hdr.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	}
 	if resp.ContentLength < 0 {
 		hdr.Del("Content-Length")
 	}
 	fmt.Fprintf(w, "HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))
 	hdr.Write(w)
 	fmt.Fprint(w, "\r\n")
-	if haveBodyRule {
-		body, _ := io.ReadAll(resp.Body)
-		s := strings.ReplaceAll(string(body), bodyFrom, bodyTo)
-		io.WriteString(w, s)
-		return true
-	}
-	io.Copy(w, resp.Body)
+	w.Write(body)
 	return true
 }
 
@@ -449,11 +472,11 @@ func main() {
 		for {
 			time.Sleep(5 * time.Second)
 			// 用 AGH 的 DNS 端口做解析（Android 的 ::1:53 无人监听）
-	net.DefaultResolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-		return dialer.DialContext(ctx, "udp", *dns)
-	}}
-	loadRules(*dir)
-	loadScripts(*dir)
+			net.DefaultResolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "udp", *dns)
+			}}
+			loadRules(*dir)
+			loadScripts(*dir)
 		}
 	}()
 

@@ -983,10 +983,14 @@ mitm_redirect_apply() {
     done
     for _u in $(mitm_uids); do
         case "$_u" in ""|*[!0-9]*) continue ;; esac
-        iptables $IPT_W -t nat -C OUTPUT -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null || \
+        # 注意：部分 ROM 的 iptables -C 对不存在的规则也返回 0（stderr 报 No chain/target/match），
+        # 信退出码会让 `||` 短路、-I 永远不执行。改用 -S 快照判断存在性。
+        _has=$(iptables $IPT_W -t nat -S OUTPUT 2>/dev/null | grep -c -- "--uid-owner $_u .*--dport 443 -j REDIRECT --to-ports 8899")
+        [ "${_has:-0}" -gt 0 ] || \
             iptables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
         # 本机无 ip6tables nat：同 uid 的 v6 443 直接 RST，逼其回落 IPv4 再被接管
-        ip6tables $IPT_W -t filter -C OUTPUT -m owner --uid-owner "$_u" -p tcp --dport 443 -j REJECT --reject-with tcp-reset 2>/dev/null || \
+        _has6=$(ip6tables $IPT_W -t filter -S OUTPUT 2>/dev/null | grep -c -- "--uid-owner $_u .*--dport 443 -j REJECT --reject-with tcp-reset")
+        [ "${_has6:-0}" -gt 0 ] || \
             ip6tables $IPT_W -t filter -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REJECT --reject-with tcp-reset 2>/dev/null
     done
 }

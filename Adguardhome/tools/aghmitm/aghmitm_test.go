@@ -118,13 +118,13 @@ func TestJSDone(t *testing.T) {
 	writeRule(t, dir, "s.js", "// @match ^https?://js\\.test/a\n$done({status:403, body:'js-blocked'});\n")
 	loadScripts(dir)
 	out := &jsResult{}
-	runScripts("https://js.test/a", "GET", map[string]string{}, "", out)
+	runScripts("https://js.test/a", "GET", map[string]string{}, "", out, "request")
 	if !out.handled || out.status != 403 || out.body != "js-blocked" {
 		t.Fatalf("handled=%v status=%d body=%q", out.handled, out.status, out.body)
 	}
 	// 不匹配的 URL 不应触发
 	out2 := &jsResult{}
-	runScripts("https://other.test/b", "GET", map[string]string{}, "", out2)
+	runScripts("https://other.test/b", "GET", map[string]string{}, "", out2, "request")
 	if out2.handled {
 		t.Fatal("未匹配的 URL 被执行了")
 	}
@@ -138,7 +138,7 @@ func TestJSTimeoutQuarantine(t *testing.T) {
 
 	start := time.Now()
 	out := &jsResult{}
-	runScripts("https://loop.test/", "GET", map[string]string{}, "", out)
+	runScripts("https://loop.test/", "GET", map[string]string{}, "", out, "request")
 	cost := time.Since(start)
 	if cost > 4*time.Second {
 		t.Fatalf("超时未生效，耗时 %v", cost)
@@ -150,7 +150,7 @@ func TestJSTimeoutQuarantine(t *testing.T) {
 	// 第二次：已被隔离，应立即返回
 	start2 := time.Now()
 	out2 := &jsResult{}
-	runScripts("https://loop.test/", "GET", map[string]string{}, "", out2)
+	runScripts("https://loop.test/", "GET", map[string]string{}, "", out2, "request")
 	cost2 := time.Since(start2)
 	if cost2 > 500*time.Millisecond {
 		t.Fatalf("隔离未生效，第二次耗时 %v", cost2)
@@ -239,3 +239,42 @@ func TestServeHTTPReject(t *testing.T) {
 }
 
 var _ = pkix.Name{}
+
+func TestResponseStageRewrite(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "js"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	js := "var o = JSON.parse($response.body); o.premium = true; $done({body: JSON.stringify(o)});"
+	if err := os.WriteFile(filepath.Join(dir, "js", "mod.js"), []byte(js), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mod := "[Script]\nX=type=http-response,pattern=^https://api\\.example\\.com/v1,script-path=mod.js\n"
+	if err := os.WriteFile(filepath.Join(dir, "x.module"), []byte(mod), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scripts = nil
+	loadScripts(dir)
+	if len(scripts) != 1 || scripts[0].stage != "response" {
+		t.Fatalf("expected 1 response-stage script, got %d stage=%q", len(scripts), stageOf(scripts))
+	}
+	// request stage must NOT run it
+	out := &jsResult{}
+	runScripts("https://api.example.com/v1/info", "GET", map[string]string{}, "", out, "request")
+	if out.handled {
+		t.Fatal("response script ran during request stage")
+	}
+	// response stage must rewrite body
+	out2 := &jsResult{status: 200, body: `{"premium":false}`}
+	runScripts("https://api.example.com/v1/info", "GET", map[string]string{}, "", out2, "response")
+	if !out2.handled || out2.respBody != `{"premium":true}` {
+		t.Fatalf("rewrite failed: handled=%v body=%q", out2.handled, out2.respBody)
+	}
+}
+
+func stageOf(l []jsScript) string {
+	if len(l) == 0 {
+		return ""
+	}
+	return l[0].stage
+}

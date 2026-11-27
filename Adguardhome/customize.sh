@@ -322,7 +322,18 @@ fi
 if [ ! -f "$SCRIPT_DIR/webui/cgi-bin/upstream" ] && [ -d "$MODPATH/scripts/webui" ]; then
     cp -rf "$MODPATH/scripts/webui/." "$SCRIPT_DIR/webui/" 2>/dev/null
 fi
-chmod 755 "$SCRIPT_DIR/webui/cgi-bin/upstream" 2>/dev/null
+# 全量赋权：cgi-bin 下所有 CGI 都要可执行。
+# 历史 bug：这里只 chmod 了 upstream 一个文件，导致 certs/scripts/privacy/mitm/apps
+# 装完后权限不是 755，busybox httpd 拒绝执行 → 前端拿到 404/空响应
+# （表现为「证书界面读取证书失败」「脚本页空列表」）。
+chmod 755 "$SCRIPT_DIR/webui/cgi-bin"/* 2>/dev/null
+chmod 644 "$SCRIPT_DIR/webui"/*.html 2>/dev/null
+# 校验关键 CGI 是否齐全，缺一个就明确记日志（装机时能在 magisk 安装日志里看到）
+for _c in privacy certs scripts mitm apps upstream; do
+    if [ ! -f "$SCRIPT_DIR/webui/cgi-bin/$_c" ]; then
+        ui_print "- WARN: CGI missing after install: $_c"
+    fi
+done
 chmod 644 "$SCRIPT_DIR/webui/upstream-manage.html" 2>/dev/null
 
 # 上游管理页也放一份到 smartdns 静态站根：手机直接访问 6080/upstream-manage.html 也能打开

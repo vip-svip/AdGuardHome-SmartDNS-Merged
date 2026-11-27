@@ -609,6 +609,20 @@ find_busybox() {
 
 start_webui() {
     [ -d "$WEBUI_DIR/cgi-bin" ] || return 0
+    # 自愈：模块目录里有、运行目录里没有的 CGI 补过来，并统一给执行权限。
+    # 历史 bug：升级 / 旧安装只带了 upstream，certs/scripts/mitm/apps 缺失，
+    # 前端请求直接 404（表现为「证书界面读取证书失败」「脚本页空列表」）。
+    _modcgi="$ADGPATH/scripts/webui/cgi-bin"
+    if [ -d "$_modcgi" ]; then
+        for _c in "$_modcgi"/*; do
+            [ -f "$_c" ] || continue
+            _n=${_c##*/}
+            if [ ! -f "$WEBUI_DIR/cgi-bin/$_n" ]; then
+                cp -f "$_c" "$WEBUI_DIR/cgi-bin/$_n" 2>/dev/null
+                log "webui: 补装缺失 CGI $_n"
+            fi
+        done
+    fi
     chmod 755 "$WEBUI_DIR/cgi-bin"/* 2>/dev/null
     pgrep -f 'httpd -p 0.0.0.0:6081' >/dev/null 2>&1 && return 0
     # 老版本可能还绑着 127.0.0.1:6081，先停掉再换监听地址
@@ -954,7 +968,11 @@ _certs_sh="$SCRIPT_DIR/certs_install.sh"
 if [ -f "$AGH_DIR/mitm_on" ] && [ -x "$BIN_DIR/aghmitm" ]; then
     if ! pgrep -f "$BIN_DIR/aghmitm" >/dev/null 2>&1; then
         _AGHD=$(awk '/^dns:/{f=1} f&&/^[[:space:]]+port:/{print $2; exit}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null)
-        setsid "$BIN_DIR/aghmitm" -listen 127.0.0.1:8899 -rules "$AGH_DIR/scripts/rewrite" -dns "127.0.0.1:${_AGHD:-5353}" >>"$AGH_DIR/mitm.log" 2>&1 &
+        case "$_AGHD" in ''|*[!0-9]*)
+            _AGHD=$(netstat -tlnup 2>/dev/null | grep AdGuardHome | grep udp | sed -n 's/.*[:.]\([0-9]*\) .*/\1/p' | head -1) ;;
+        esac
+        case "$_AGHD" in ''|*[!0-9]*) _AGHD=$(grep -oE '^redir_port=[0-9]+' "$AGH_DIR/scripts/config.prop" 2>/dev/null | cut -d= -f2) ;; esac
+        setsid "$BIN_DIR/aghmitm" -listen 127.0.0.1:8899 -rules "$AGH_DIR/scripts/rewrite" -dns "127.0.0.1:${_AGHD:-5591}" >>"$AGH_DIR/mitm.log" 2>&1 &
 fi
 fi
 _privacy_cgi="$SCRIPT_DIR/webui/cgi-bin/privacy"
