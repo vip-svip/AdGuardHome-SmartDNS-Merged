@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>高级设置 · 隐私防护</title>
 <style>
-:root{--bg:#f4f6f8;--card:#fff;--text:#2b2b2b;--muted:#6b7280;--line:#e5e7eb;--accent:#67b279;--accent-dim:#9aa0a6;--btn:#eef1f4}
-@media (prefers-color-scheme:dark){:root{--bg:#111418;--card:#1b2026;--text:#e8eaed;--muted:#9aa0a6;--line:#2a3138;--accent:#5fbf82;--btn:#232a31}}
+:root{--bg:#f4f6f8;--card:#fff;--text:#2b2b2b;--muted:#6b7280;--line:#e5e7eb;--accent:#67b279;--accent-dim:#9aa0a6;--btn:#eef1f4;--warn:#d08b2c}
+@media (prefers-color-scheme:dark){:root{--bg:#111418;--card:#1b2026;--text:#e8eaed;--muted:#9aa0a6;--line:#2a3138;--accent:#5fbf82;--btn:#232a31;--warn:#e0a94a}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
 .wrap{max-width:760px;margin:0 auto;padding:24px 16px 48px}
@@ -18,9 +18,11 @@ h1{font-size:20px;margin:0 0 4px}
 .row .t{font-weight:600;margin-bottom:4px}
 .row .d{color:var(--muted);font-size:13px}
 .row .c{margin-left:auto;flex:0 0 auto}
-button.sw{min-width:86px;border:1px solid transparent;border-radius:999px;padding:8px 14px;font-size:14px;cursor:pointer;transition:.15s}
+button.sw{min-width:86px;border:1px solid transparent;border-radius:999px;padding:8px 14px;font-size:14px;cursor:pointer;transition:.15s;font-variant-numeric:tabular-nums}
 button.on{background:var(--accent);color:#0b1a10}
 button.off{background:var(--btn);color:var(--muted)}
+button.busy{background:var(--btn);color:var(--accent);cursor:progress}
+button.sw:disabled{cursor:progress}
 h2{font-size:15px;margin:26px 0 10px}
 .links{display:flex;flex-wrap:wrap;gap:8px}
 .links a{display:inline-block;padding:8px 12px;border:1px solid var(--line);border-radius:8px;color:var(--text);text-decoration:none;font-size:13px;background:var(--card)}
@@ -29,12 +31,13 @@ h2{font-size:15px;margin:26px 0 10px}
 .msg{font-size:13px;margin-top:10px;min-height:18px}
 .msg.ok{color:var(--accent)}
 .msg.err{color:#e06c75}
+.msg.warn{color:var(--warn)}
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>高级设置 · 隐私防护</h1>
-  <div class="sub">防 DNS 泄露 / 防 VPN 泄露 / 防 IP 泄露 · 由本机 iptables 与 AGH 解析链生效</div>
+  <div class="sub">防 DNS / VPN / IP / NTP / DHCP / 局域网 / 明文协议 / SNMP 泄露 · 由本机 iptables 与 AGH 解析链生效</div>
   <div class="card" id="rows"></div>
 
   <h2>一键过检测</h2>
@@ -44,45 +47,94 @@ h2{font-size:15px;margin:26px 0 10px}
     <a href="https://ipleak.net/" target="_blank" rel="noreferrer">IP / 位置检测</a>
     <a href="https://browserleaks.com/ip" target="_blank" rel="noreferrer">综合检测</a>
   </div>
-  <div class="note">说明：本页只控制本机网络泄露面（DNS / WebRTC / IP）。出口 IP 归属由你的网络决定，检测站仍会看到当前公网 IP。</div>
+  <div class="note">说明：本页只控制本机网络泄露面（DNS / WebRTC / IP 等）。出口 IP 归属由你的网络决定，检测站仍会看到当前公网 IP。</div>
   <div class="msg" id="msg"></div>
 </div>
 <script>
+var KEYS = ['dns','vpn','ip','ntp','dhcp','smb','tcp','snmp','sb','par'];
 var ITEMS = [
-  {k:'dns', t:'防止 DNS 泄露', d:'丢弃 mDNS / SSDP / NetBIOS 探针，解析全部强制走 AGH 加密上游，检测站看不到运营商 DNS。'},
-  {k:'vpn', t:'防止 VPN 泄露', d:'阻断 STUN / TURN 与 Teredo 隧道协商，WebRTC 暴露不出真实出口；VPN 断开也不回落本地网络。'},
-  {k:'ip',  t:'防止 IP 泄露', d:'屏蔽 WebRTC ICE 所需 STUN 端口，网站拿不到局域网 IP 与公网映射地址。'}
+  {k:'dns', t:'防止 DNS 泄露', d:'丢弃 mDNS / SSDP / NetBIOS 探针，全部解析强制走 AGH 加密上游，检测网站看不到运营商 DNS。'},
+  {k:'vpn', t:'防止 VPN 泄露', d:'阻断 STUN / TURN 与 Teredo 隧道协商，WebRTC 暴露不出真实出口；VPN 断开也不回落到本地网络。'},
+  {k:'ip',  t:'防止 IP 泄露', d:'屏蔽 WebRTC ICE 收集所需的 STUN 端口，网站拿不到局域网 IP 与公网映射地址。'},
+  {k:'ntp', t:'防止 NTP 时钟泄露', d:'丢弃出网 NTP 对时请求（UDP 123）。时钟指纹可跨网络关联同一设备；本机时间由系统维护不受影响。'},
+  {k:'dhcp',t:'防止 DHCP 探测泄露', d:'丢弃出网 DHCP 广播（UDP 67）。防恶意热点通过 DHCP 指纹识别设备型号与系统。'},
+  {k:'smb', t:'防止局域网探测泄露', d:'丢弃 NetBIOS / SMB 出网流量（137/139/445）。防内网扫描器读取设备名与共享目录。'},
+  {k:'tcp', t:'防止明文协议泄露', d:'丢弃 Telnet / SMTP / POP3 / IMAP 明文端口出网（23/25/110/143）。防 App 明文回传数据。'},
+  {k:'snmp',t:'防止 SNMP 信息泄露', d:'丢弃 SNMP 查询与陷阱（161/162）。防设备信息（系统版本、接口列表）被读取。'},
+  {k:'sb',  t:'恶意网站拦截', d:'AGH Safebrowsing 引擎：访问钓鱼 / 恶意域名时在 DNS 与 SNI 双层拦截，全 App 生效。'},
+  {k:'par', t:'成人内容过滤', d:'AGH 家长控制引擎：DNS 层屏蔽成人网站域名解析，系统级生效。'}
 ];
-var state = {dns:1,vpn:1,ip:1};
-var msg = document.getElementById('msg');
-function render(){
-  var box = document.getElementById('rows');
+
+var state = null;          // null = 未知（还没拿到真值）
+var busy = {};             // 每个开关的写入中标记
+var CUR = '/cgi-bin/privacy';
+var CACHE_KEY = 'agh_priv_state_v2';
+
+function $(id){ return document.getElementById(id); }
+function msg(txt, cls){ var m=$('msg'); m.className='msg'+(cls?(' '+cls):''); m.textContent=txt||''; }
+
+function paint(){
+  var box = $('rows');
   box.innerHTML = ITEMS.map(function(it){
-    var on = state[it.k] ? 'on' : 'off';
-    var label = state[it.k] ? '已开启' : '已关闭';
+    var v = state ? (state[it.k]|0) : null;
+    var cls, label, dis = '';
+    if (busy[it.k]) { cls='busy'; label='应用中…'; dis=' disabled'; }
+    else if (v === null) { cls='off'; label='读取中'; dis=' disabled'; }
+    else { cls = v ? 'on' : 'off'; label = v ? '已开启' : '已关闭'; }
     return '<div class="row"><div><div class="t">'+it.t+'</div><div class="d">'+it.d+'</div></div>'+
-      '<div class="c"><button class="sw '+on+'" data-k="'+it.k+'">'+label+'</button></div></div>';
+      '<div class="c"><button class="sw '+cls+'" data-k="'+it.k+'"'+dis+'>'+label+'</button></div></div>';
   }).join('');
   Array.prototype.forEach.call(box.querySelectorAll('button.sw'), function(b){
-    b.onclick = function(){ toggle(b.getAttribute('data-k')); };
+    b.onclick = function(){ if(!b.disabled) toggle(b.getAttribute('data-k')); };
   });
 }
+
+function absorb(j){
+  var s = {};
+  KEYS.forEach(function(k){ s[k] = (j[k]|0) ? 1 : 0; });
+  state = s;
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(s)); } catch(e){}
+  if (j.sb_blocked || j.par_blocked) msg('恶意网站拦截 / 成人内容过滤的上游服务在本网络不可达，已保持关闭（强开会导致整机断网）', 'warn');
+  else msg('');
+  paint();
+}
+
+// 首屏：有本地缓存先按缓存画（按钮禁用、标记同步中），拿到真值再解锁
+(function boot(){
+  var cached = null;
+  try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch(e){}
+  if (cached && typeof cached === 'object') { state = cached; paint(); msg('正在与守护进程核对状态…'); }
+  else { state = null; paint(); }
+})();
+
+var inflight = false;
 function load(){
-  fetch('/cgi-bin/privacy?t='+Date.now()).then(function(r){return r.json();}).then(function(j){
-    state = {dns:j.dns|0, vpn:j.vpn|0, ip:j.ip|0}; render(); msg.textContent='';
-  }).catch(function(){ msg.className='msg err'; msg.textContent='读取状态失败：隐私守护脚本未就绪'; });
+  if (inflight) return Promise.resolve();
+  inflight = true;
+  return fetch(CUR+'?t='+Date.now(), {cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); })
+    .then(function(j){ inflight=false; absorb(j); })
+    .catch(function(){ inflight=false; msg('读取状态失败：隐私守护未就绪（6081 /cgi-bin/privacy 无响应）', 'err');
+      // 失败也要把按钮解开，不能一直卡在「读取中」
+      if (state) paint(); else { state = {}; KEYS.forEach(function(k){ state[k]=0; }); paint(); } });
 }
+
 function toggle(k){
-  var next = {dns:state.dns, vpn:state.vpn, ip:state.ip};
+  if (!state || busy[k]) return;
+  var next = {};
+  KEYS.forEach(function(x){ next[x] = state[x]; });
   next[k] = state[k] ? 0 : 1;
-  state = next; render();
-  fetch('/cgi-bin/privacy', {method:'POST', headers:{'Content-Type':'text/plain'}, body:'dns='+next.dns+'&vpn='+next.vpn+'&ip='+next.ip})
-    .then(function(r){return r.json();}).then(function(j){
-      state = {dns:j.dns|0, vpn:j.vpn|0, ip:j.ip|0}; render();
-      msg.className='msg ok'; msg.textContent='已生效';
-    }).catch(function(){ msg.className='msg err'; msg.textContent='应用失败，请确认 6081 服务在运行'; });
+  busy[k] = 1; paint();                       // 只把这一行标成「应用中」，不动别的行
+  var body = KEYS.map(function(x){ return x+'='+next[x]; }).join('&');
+  fetch(CUR, {method:'POST', headers:{'Content-Type':'text/plain'}, body:body, cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); })
+    .then(function(j){ busy[k]=0; absorb(j); msg('已生效', 'ok'); })
+    .catch(function(){ busy[k]=0; paint(); msg('写入失败，状态已回退', 'err'); });
 }
+
 load();
+// 切回前台再核对一次（后台可能被守护/开机脚本改过）
+document.addEventListener('visibilitychange', function(){ if(!document.hidden) load(); });
 </script>
 </body>
 </html>

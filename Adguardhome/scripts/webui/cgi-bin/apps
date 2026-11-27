@@ -1,14 +1,19 @@
 #!/system/bin/sh
 # 应用分流 CGI
-#   GET  /cgi-bin/apps                     -> {"apps":[{name,uid,state}...]}  state: normal|bypass|force
+#   GET  /cgi-bin/apps                     -> {"apps":[{pkg,uid,state}...]}  state: normal|bypass|force
 #   GET  /cgi-bin/apps?set=PKG&mode=MODE   -> 写入 绕过/强制 名单并触发规则重建
 # MODE: normal | bypass | force
+#
+# 性能说明：旧版对每个包（380 个）各跑 3 次 grep 判断状态，
+# 单次 GET 实测 19.1s（Android 上 fork 一次约 25~35ms）。
+# 现在整张列表由一次 awk 完成（读 CACHE/BYPASS/FORCE 到内存后一次遍历）。
 DIR=/data/adb/agh
 BYPASS="$DIR/apps_bypass.txt"
 FORCE="$DIR/apps_force.txt"
 CACHE="$DIR/.pm_uids"
 
 cors() {
+    printf 'Cache-Control: no-store, no-cache, must-revalidate\r\n'
     printf 'Access-Control-Allow-Origin: *\r\n'
     printf 'Access-Control-Allow-Methods: GET, OPTIONS\r\n'
     printf 'Access-Control-Allow-Headers: *\r\n'
@@ -17,7 +22,8 @@ cors() {
 }
 case "$REQUEST_METHOD" in OPTIONS) cors; exit 0 ;; esac
 
-touch "$BYPASS" "$FORCE" 2>/dev/null
+[ -f "$BYPASS" ] || : > "$BYPASS" 2>/dev/null
+[ -f "$FORCE" ] || : > "$FORCE" 2>/dev/null
 
 # 包名 → uid（缓存，packages.xml 更新后失效）
 pm_cache() {
@@ -26,13 +32,10 @@ pm_cache() {
     if [ "$_need" = "0" ] && [ -f /data/system/packages.xml ] && [ "$CACHE" -ot /data/system/packages.xml ]; then
         _need=1
     fi
-    [ "$_need" = "1" ] && pm list packages -U 2>/dev/null | sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\).*/\1 \2/p' > "$CACHE" 2>/dev/null
-}
-
-state_of() {
-    grep -qx "$1" "$FORCE" 2>/dev/null && { echo force; return; }
-    grep -qx "$1" "$BYPASS" 2>/dev/null && { echo bypass; return; }
-    echo normal
+    if [ "$_need" = "1" ]; then
+        pm list packages -U 2>/dev/null | sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\).*/\1 \2/p' > "$CACHE.tmp" 2>/dev/null
+        [ -s "$CACHE.tmp" ] && mv -f "$CACHE.tmp" "$CACHE"
+    fi
 }
 
 Q="$QUERY_STRING"
@@ -61,33 +64,37 @@ esac
 
 pm_cache
 cors
-printf '{"ok":true,"bypass":[' 
-first=1
-while read -r u; do
-    [ -n "$u" ] || continue
-    [ $first -eq 1 ] || printf ','
-    first=0
-    printf '"%s"' "$u"
-done < "$BYPASS"
-printf '],"force":['
-first=1
-while read -r u; do
-    [ -n "$u" ] || continue
-    [ $first -eq 1 ] || printf ','
-    first=0
-    printf '"%s"' "$u"
-done < "$FORCE"
-printf '],"apps":['
-first=1
-# 只列第三方+常用系统应用，避免一次吐几千条
-awk '{print $1" "$2}' "$CACHE" 2>/dev/null | while read -r pkg uid; do
-    [ -n "$pkg" ] || continue
-    case "$pkg" in
-        android|com.android.*|com.google.android.*|com.miui.*|com.oplus.*) [ -z "$(grep -x "$uid" "$BYPASS" "$FORCE" 2>/dev/null)" ] && continue ;;
-    esac
-    st=$(grep -qx "$uid" "$FORCE" 2>/dev/null && echo force || { grep -qx "$uid" "$BYPASS" 2>/dev/null && echo bypass || echo normal; })
-    [ $first -eq 1 ] || printf ','
-    first=0
-    printf '{"pkg":"%s","uid":"%s","state":"%s"}' "$pkg" "$uid" "$st"
-done
-printf ']}\n'
+awk -v byp="$BYPASS" -v frc="$FORCE" -v cache="$CACHE" '
+    function trim(s) { gsub(/[ \t\r]/, "", s); return s }
+    BEGIN {
+        nb = 0
+        while ((getline l < byp) > 0) {
+            l = trim(l); if (l == "") continue
+            if (!(l in bs)) { bs[l] = 1; bl[++nb] = l }
+        }
+        close(byp)
+        nf = 0
+        while ((getline l < frc) > 0) {
+            l = trim(l); if (l == "") continue
+            if (!(l in fs)) { fs[l] = 1; fl[++nf] = l }
+        }
+        close(frc)
+        printf "{\"ok\":true,\"bypass\":["
+        for (i = 1; i <= nb; i++) printf "%s\"%s\"", (i > 1 ? "," : ""), bl[i]
+        printf "],\"force\":["
+        for (i = 1; i <= nf; i++) printf "%s\"%s\"", (i > 1 ? "," : ""), fl[i]
+        printf "],\"apps\":["
+        first = 1
+    }
+    {
+        pkg = trim($1); uid = trim($2)
+        if (pkg == "" || uid == "") next
+        # 系统包太多（380+），默认不列；除非用户在名单里操作过
+        if (pkg ~ /^(android|com\.android\.|com\.google\.android\.|com\.miui\.|com\.oplus\.)/ \
+            && !(uid in bs) && !(uid in fs)) next
+        st = (uid in fs) ? "force" : ((uid in bs) ? "bypass" : "normal")
+        printf "%s{\"pkg\":\"%s\",\"uid\":\"%s\",\"state\":\"%s\"}", (first ? "" : ","), pkg, uid, st
+        first = 0
+    }
+    END { printf "]}\n" }
+' "$CACHE" 2>/dev/null

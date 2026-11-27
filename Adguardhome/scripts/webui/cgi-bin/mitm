@@ -31,6 +31,7 @@ start_mitm() {
 }
 
 cors() {
+    printf 'Cache-Control: no-store, no-cache, must-revalidate\r\n'
     printf 'Access-Control-Allow-Origin: *\r\n'
     printf 'Access-Control-Allow-Methods: GET, OPTIONS\r\n'
     printf 'Access-Control-Allow-Headers: *\r\n'
@@ -38,7 +39,7 @@ cors() {
     printf '\r\n'
 }
 case "$REQUEST_METHOD" in OPTIONS) cors; exit 0 ;; esac
-touch "$UIDF" 2>/dev/null
+[ -f "$UIDF" ] || : > "$UIDF" 2>/dev/null
 
 pkg_uid() {
     _c="$DIR/.pm_uids"
@@ -73,6 +74,7 @@ case "$Q" in
         : > "$DIR/mitm_on"
         seed_uids
         start_mitm
+        rm -f /data/adb/agh/.mitm_resp 2>/dev/null
 
         sleep 1
         setsid sh "$DIR/scripts/iptables.sh" --once >/dev/null 2>&1 &
@@ -82,6 +84,7 @@ case "$Q" in
     all=1*|all=on*)
         : > "$DIR/mitm_on"
         seed_all
+        rm -f /data/adb/agh/.mitm_resp 2>/dev/null
         sleep 1
         start_mitm
 
@@ -90,6 +93,7 @@ case "$Q" in
         exit 0 ;;
     cmd=off*)
         rm -f "$DIR/mitm_on"
+        rm -f /data/adb/agh/.mitm_resp 2>/dev/null
         pidof aghmitm | xargs -r kill 2>/dev/null
         cors; printf '{"ok":true,"running":0}\n'
         exit 0 ;;
@@ -101,18 +105,55 @@ case "$Q" in
         [ -n "$u" ] || { cors; printf '{"ok":false,"error":"uid not found"}\n'; exit 0; }
         grep -vx "$u" "$UIDF" > "$UIDF.t" 2>/dev/null; mv "$UIDF.t" "$UIDF" 2>/dev/null
         [ "$op" = "add" ] && echo "$u" >> "$UIDF"
+        rm -f /data/adb/agh/.mitm_resp 2>/dev/null
         setsid sh "$DIR/scripts/iptables.sh" --once >/dev/null 2>&1 &
         cors; printf '{"ok":true,"pkg":"%s","uid":"%s","mode":"%s"}\n' "$pkg" "$u" "$op"
         exit 0 ;;
 esac
 
-pid=$(pidof aghmitm 2>/dev/null)
-n=$(grep -c . "$UIDF" 2>/dev/null)
-r=$(grep -c 'url' "$DIR/scripts/rewrite"/* 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
-js=0
-for _f in "$DIR"/scripts/rewrite/*.js "$DIR"/scripts/rewrite/js/*.js; do
-    [ -f "$_f" ] && js=$((js + 1))
-done
-cors
-printf '{"running":%s,"pid":"%s","port":8899,"uids":%s,"rules":%s,"js":%s,"log":"%s"}\n' \
-    "$([ -n "$pid" ] && echo 1 || echo 0)" "${pid:-}" "${n:-0}" "${r:-0}" "$js" "$LOG"
+# 状态响应（含响应头）缓存：命中只需一次 cat（~40ms），
+# 启停/增删名单后统一 rm 掉缓存强制重建。
+RESP=/data/adb/agh/.mitm_resp
+build_resp() {
+    {
+        cors
+        _rd=$(iptables -t nat -S OUTPUT 2>/dev/null | grep -c '8899')
+        printf '{"running":%s,"pid":"%s","port":8899,"uids":%s,"rules":%s,"js":%s,"log":"%s","on":%s,"redirect":%s,"warn":"%s"}\n' \
+            "$([ -n "$(pidof aghmitm)" ] && echo 1 || echo 0)" "$(pidof aghmitm 2>/dev/null)" \
+            "$(grep -c . "$UIDF" 2>/dev/null)" \
+            "$(grep -c 'url' "$DIR/scripts/rewrite"/* 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')" \
+            "$(js_n)" "$LOG" \
+            "$([ -f "$DIR/mitm_on" ] && echo 1 || echo 0)" "${_rd:-0}" "$(mitm_warn)"
+    } > "$RESP.tmp" 2>/dev/null
+    [ -s "$RESP.tmp" ] && mv -f "$RESP.tmp" "$RESP" 2>/dev/null
+    return 0
+}
+js_n() {
+    _j=0
+    for _f in "$DIR"/scripts/rewrite/*.js "$DIR"/scripts/rewrite/js/*.js; do
+        [ -f "$_f" ] && _j=$((_j + 1))
+    done
+    echo "$_j"
+}
+
+# 一致性校验：开关开 + 名单空 = 没有任何 443 被接管（真机上踩过的静默坏状态）
+mitm_warn() {
+    [ -f "$DIR/mitm_on" ] || { echo ""; return 0; }
+    [ -s "$UIDF" ] && { echo ""; return 0; }
+    echo "接管名单为空，443 没有被 MITM 接管（守护自愈会在 5 秒内播种浏览器类应用）"
+}
+
+case "$QUERY_STRING" in
+    *rebuild=*) rm -f "$RESP" 2>/dev/null ;;
+esac
+# 轻量失效判定：名单/开关文件比缓存新就重建（-nt 是 shell 内建，不 fork）
+if [ -f "$RESP" ]; then
+    [ "$UIDF" -nt "$RESP" ] && rm -f "$RESP" 2>/dev/null
+    [ -f "$DIR/mitm_on" ] && [ "$DIR/mitm_on" -nt "$RESP" ] && rm -f "$RESP" 2>/dev/null
+fi
+if [ -s "$RESP" ]; then
+    cat "$RESP" 2>/dev/null
+else
+    build_resp
+    cat "$RESP" 2>/dev/null || { cors; printf '{"running":0,"error":"build failed"}\n'; }
+fi

@@ -20,6 +20,7 @@ AGH=http://127.0.0.1:40251
 LOGIN=root:root
 
 cors() {
+    printf 'Cache-Control: no-store, no-cache, must-revalidate\r\n'
     printf 'Access-Control-Allow-Origin: *\r\n'
     printf 'Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n'
     printf 'Access-Control-Allow-Headers: *\r\n'
@@ -28,7 +29,50 @@ cors() {
 }
 json_escape() { printf '%s' "$1" | tr -d '\r\n' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-mkdir -p "$DIR" 2>/dev/null
+[ -d "$DIR" ] || mkdir -p "$DIR" 2>/dev/null
+
+# ---- 列表快照缓存 ----
+# 列表 CGI 对每个脚本要跑 fmt_of/domains_of/count_reject/date/wc 十余条管道，
+# 冷算一次实测 0.9s；前端在拿到响应前会先渲染空态（「这里还没有脚本」）→ 刷新闪烁。
+# 现在按「目录内容签名」缓存整段 JSON，签名没变就直接吐快照（毫秒级）。
+LIST_SNAP=/data/adb/agh/.scripts_list.json
+LIST_SIG=/data/adb/agh/.scripts_list.sig
+LIST_RESP=/data/adb/agh/.scripts_list.resp
+dir_sig() {
+    stat -c '%n %s %Y' "$DIR"/* "$DIR"/js/*.js "$DIR"/.*.off 2>/dev/null
+}
+
+# 列表响应（含响应头）整体缓存：GET 命中时只有一次 cat，
+# 把冷算的 0.9s 降到 ~20ms，前端来不及渲染「这里还没有脚本」空态。
+build_list() {
+    {
+        printf 'Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\n'
+        printf 'Content-Type: application/json; charset=utf-8\r\n\r\n'
+        printf '{"dir":"%s","out":"%s","catalog":"%s","js_total":%s,"scripts":[' "$DIR" "$OUT" "$CAT" "$(js_count)"
+        _first=1
+        for f in "$DIR"/*; do
+            [ -f "$f" ] || continue
+            b=${f##*/}
+            case "$b" in .*) continue ;; esac
+            typ=$(fmt_of "$b")
+            sz=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+            mt=$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null)
+            dn=$(domains_of "$b" | tr -d ' ' | tr 'A-Z' 'a-z' | sed 's/^\*\.//' | grep -E '^[a-z0-9]' | sort -u | wc -l | tr -d ' ')
+            rj=$(count_reject "$b")
+            en=$(enabled "$b")
+            if [ $_first -eq 1 ]; then _first=0; else printf ','; fi
+            printf '{"name":"%s","type":"%s","size":%s,"mtime":"%s","domains":%s,"reject_rules":%s,"enabled":%s}' \
+                "$(json_escape "$b")" "$typ" "${sz:-0}" "${mt:-}" "${dn:-0}" "${rj:-0}" "$en"
+        done
+        printf ']}\n'
+    } > "$LIST_RESP.tmp" 2>/dev/null
+    if [ -s "$LIST_RESP.tmp" ]; then
+        mv -f "$LIST_RESP.tmp" "$LIST_RESP" 2>/dev/null
+        dir_sig > "$LIST_SIG" 2>/dev/null
+    else
+        rm -f "$LIST_RESP.tmp" 2>/dev/null
+    fi
+}
 
 enabled() { [ -f "$DIR/.$1.off" ] && echo 0 || echo 1; }
 
@@ -166,6 +210,7 @@ do_apply() {
     [ -n "$_ap_ids" ] && curl -s -u "$LOGIN" -H 'Content-Type: application/json' -d "{\"ids\":[$_ap_ids]}" "$AGH/control/filtering/refresh" >/dev/null 2>&1
     cors; printf '{"ok":true,"applied":%s,"file":"%s"}\n' "$_ap_cnt" "$OUT"
 }
+do_apply_list() { do_apply "$@" >/dev/null 2>&1; build_list; }
 write_body() {
     _name=$(clean_name "$1")
     [ -n "$_name" ] || { cors; printf '{"ok":false,"error":"bad name"}\n'; return; }
@@ -180,7 +225,7 @@ write_body() {
     rm -f "$DIR/.$_name.off" 2>/dev/null
     fetch_js "$_name"
     _sz=$(wc -c < "$DIR/$_name" 2>/dev/null | tr -d ' ')
-    do_apply >/dev/null 2>&1
+    do_apply_list
     cors; printf '{"ok":true,"name":"%s","size":%s,"js":%s}\n' "$(json_escape "$_name")" "${_sz:-0}" "$(js_count)"
 }
 
@@ -212,7 +257,7 @@ case "$Q" in
             rm -f "$DIR/.$_n.off" 2>/dev/null
             fetch_js "$_n"
             _sz=$(wc -c < "$DIR/$_n" 2>/dev/null | tr -d ' ')
-            do_apply >/dev/null 2>&1
+            do_apply_list
             cors; printf '{"ok":true,"name":"%s","size":%s,"js":%s}\n' "$(json_escape "$_n")" "${_sz:-0}" "$(js_count)"
         else
             rm -f "$DIR/$_n" 2>/dev/null
@@ -220,7 +265,7 @@ case "$Q" in
         fi
         exit 0
         ;;
-    *apply=*)  do_apply; exit 0 ;;
+    *apply=*)  do_apply; build_list; exit 0 ;;
     *catalog=*)
         cors
         _idx="$CAT/index.json"
@@ -250,7 +295,7 @@ case "$Q" in
             chmod 644 "$DIR/$_base" 2>/dev/null
             rm -f "$DIR/.$_base.off" 2>/dev/null
             fetch_js "$_base"
-            do_apply >/dev/null 2>&1
+            do_apply_list
             cors; printf '{"ok":true,"name":"%s","js":%s}\n' "$(json_escape "$_base")" "$(js_count)"
         else
             rm -f "$DIR/$_base" 2>/dev/null
@@ -308,6 +353,7 @@ case "$Q" in
         case "$_n" in ""|*/*|*..*) cors; printf '{"ok":false,"error":"bad name"}\n'; exit 0 ;; esac
         [ -f "$DIR/$_n" ] || { cors; printf '{"ok":false,"error":"not found"}\n'; exit 0; }
         if [ -f "$DIR/.$_n.off" ]; then rm -f "$DIR/.$_n.off"; _st=1; else : > "$DIR/.$_n.off"; _st=0; fi
+        build_list
         cors; printf '{"ok":true,"name":"%s","enabled":%s}\n' "$(json_escape "$_n")" "$_st"
         exit 0
         ;;
@@ -316,7 +362,7 @@ case "$Q" in
         case "$_n" in ""|*/*|*..*|.*) cors; printf '{"ok":false,"error":"bad name"}\n'; exit 0 ;; esac
         if [ -f "$DIR/$_n" ]; then
             rm -f "$DIR/$_n" "$DIR/.$_n.off" 2>/dev/null
-            do_apply >/dev/null 2>&1
+            do_apply_list
             cors; printf '{"ok":true,"deleted":"%s"}\n' "$(json_escape "$_n")"
         else
             cors; printf '{"ok":false,"error":"not found"}\n'
@@ -325,21 +371,25 @@ case "$Q" in
         ;;
 esac
 
-cors
-printf '{"dir":"%s","out":"%s","catalog":"%s","js_total":%s,"scripts":[' "$DIR" "$OUT" "$CAT" "$(js_count)"
-_first=1
-for f in "$DIR"/*; do
-    [ -f "$f" ] || continue
-    b=$(basename "$f")
-    case "$b" in .*) continue ;; esac
-    typ=$(fmt_of "$b")
-    sz=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
-    mt=$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null)
-    dn=$(domains_of "$b" | tr -d ' ' | tr 'A-Z' 'a-z' | sed 's/^\*\.//' | grep -E '^[a-z0-9]' | sort -u | wc -l | tr -d ' ')
-    rj=$(count_reject "$b")
-    en=$(enabled "$b")
-    if [ $_first -eq 1 ]; then _first=0; else printf ','; fi
-    printf '{"name":"%s","type":"%s","size":%s,"mtime":"%s","domains":%s,"reject_rules":%s,"enabled":%s}' \
-        "$(json_escape "$b")" "$typ" "${sz:-0}" "${mt:-}" "${dn:-0}" "${rj:-0}" "$en"
-done
-printf ']}\n'
+# GET 列表：命中缓存就是一次 cat（~20ms）；?rebuild=1 强制重算
+case "$QUERY_STRING" in
+    *rebuild=*) rm -f "$LIST_RESP" ;;
+esac
+# 目录/文件比缓存新（新增、删除、外部编辑）就重建。-nt 是 shell 内建，不 fork。
+if [ -s "$LIST_RESP" ]; then
+    [ "$DIR" -nt "$LIST_RESP" ] && rm -f "$LIST_RESP"
+    for _f in "$DIR"/* "$DIR"/js/*.js "$DIR"/.*.off; do
+        [ -f "$_f" ] && [ "$_f" -nt "$LIST_RESP" ] && { rm -f "$LIST_RESP"; break; }
+    done
+fi
+if [ -s "$LIST_RESP" ]; then
+    cat "$LIST_RESP" 2>/dev/null
+else
+    build_list
+    if [ -s "$LIST_RESP" ]; then
+        cat "$LIST_RESP" 2>/dev/null
+    else
+        cors
+        printf '{"dir":"%s","out":"%s","catalog":"%s","js_total":0,"scripts":[]}\n' "$DIR" "$OUT" "$CAT"
+    fi
+fi

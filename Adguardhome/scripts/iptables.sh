@@ -964,7 +964,27 @@ mitm_uids() {
     [ -f "$_f" ] || return 0
     grep -oE '^[0-9]+' "$_f" 2>/dev/null | sort -u | tr '\n' ' '
 }
+# 自愈：MITM 开关是开的（mitm_on 存在）但接管名单为空时，
+# 443 没有任何一条 REDIRECT，MITM 等于没开（日志照样刷 rules loaded）。
+# 这里按「浏览器/客户端类应用」播种一次，保证开关状态与实际接管一致。
+mitm_selfheal() {
+    [ -f /data/adb/agh/mitm_on ] || return 0
+    [ -s /data/adb/agh/mitm_uids.txt ] && return 0
+    _c=/data/adb/agh/.pm_uids
+    [ -s "$_c" ] || pm list packages -U 2>/dev/null \
+        | sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\).*/\1 \2/p' > "$_c" 2>/dev/null
+    [ -s "$_c" ] || return 0
+    awk '$1 ~ /(chrome|chromium|firefox|browser|quark|ucmobile|ucweb|mtt|searchbox|via|emmx|sbrowser|brave|opera|vivaldi|webview)/ {
+        print $2
+    }' "$_c" 2>/dev/null | sort -u > /data/adb/agh/mitm_uids.txt.t 2>/dev/null
+    if [ -s /data/adb/agh/mitm_uids.txt.t ]; then
+        mv -f /data/adb/agh/mitm_uids.txt.t /data/adb/agh/mitm_uids.txt 2>/dev/null
+    else
+        rm -f /data/adb/agh/mitm_uids.txt.t 2>/dev/null
+    fi
+}
 mitm_redirect_apply() {
+    mitm_selfheal
     # 幂等增删：只删「名单里已不存在」的规则，只补「缺失」的规则。
     # 早期实现是每次重建都先全删再加，导致守护每 5 秒抖动一次 iptables，
     # 计数器被清零（实测 nat 计数一直读到 0），也白白增加内核开销。

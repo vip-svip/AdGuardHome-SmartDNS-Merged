@@ -11,6 +11,7 @@ SYS=/system/etc/security/cacerts
 SNAP=/data/adb/agh/cacerts_orig
 
 cors() {
+    printf 'Cache-Control: no-store, no-cache, must-revalidate\r\n'
     printf 'Access-Control-Allow-Origin: *\r\n'
     printf 'Access-Control-Allow-Methods: GET, OPTIONS\r\n'
     printf 'Access-Control-Allow-Headers: *\r\n'
@@ -106,6 +107,7 @@ case "$QUERY_STRING" in
         fi
         cors
         _now=$(ls "$SYS" 2>/dev/null | wc -l | tr -d ' ')
+        rm -f /data/adb/agh/.certs_resp 2>/dev/null
         printf '{"ok":%s,"rc":%d,"system_count":%s}\n' \
             "$([ "$_rc" = 0 ] && echo true || echo false)" "$_rc" "$_now"
         exit 0
@@ -132,16 +134,46 @@ case "$REQUEST_METHOD" in
     OPTIONS) cors; exit 0 ;;
 esac
 
-cors
-printf '{'
-one "https" "https-ca" "2c637461"
-printf ','
-one "mitm" "mitm-ca" "e2b6a4fd"
-_now=$(ls "$SYS" 2>/dev/null | wc -l | tr -d ' ')
-_base=0
-[ -f "$SNAP/.count" ] && _base=$(cat "$SNAP/.count" 2>/dev/null | tr -d ' ')
-case "$_base" in ''|*[!0-9]*) _base=0 ;; esac
-_tmpfs=0
-mountpoint -q "$SYS" 2>/dev/null && _tmpfs=1
-printf ',"system_cacerts":"%s","module_certs":"%s","system_count":%s,"baseline":%s,"tmpfs":%d}\n' \
-    "$SYS" "$CERTDIR" "$_now" "$_base" "$_tmpfs"
+# 整段响应（含响应头）缓存：静态查询一次 0.86s（每个字段一次 grep/openssl），
+# 缓存后 GET 只要一次 cat（~20ms），证书页刷新也不再闪空态。
+RESP=/data/adb/agh/.certs_resp
+build_resp() {
+    {
+        cors
+        printf '{'
+        one "https" "https-ca" "2c637461"
+        printf ','
+        one "mitm" "mitm-ca" "e2b6a4fd"
+        _now=$(ls "$SYS" 2>/dev/null | wc -l | tr -d ' ')
+        _base=0
+        [ -f "$SNAP/.count" ] && _base=$(cat "$SNAP/.count" 2>/dev/null | tr -d ' ')
+        case "$_base" in ''|*[!0-9]*) _base=0 ;; esac
+        _tmpfs=0
+        mountpoint -q "$SYS" 2>/dev/null && _tmpfs=1
+        printf ',"system_cacerts":"%s","module_certs":"%s","system_count":%s,"baseline":%s,"tmpfs":%d}\n' \
+            "$SYS" "$CERTDIR" "$_now" "$_base" "$_tmpfs"
+    } > "$RESP.tmp" 2>/dev/null
+    [ -s "$RESP.tmp" ] && mv -f "$RESP.tmp" "$RESP" 2>/dev/null
+    return 0
+}
+
+case "$QUERY_STRING" in
+    *rebuild=*) rm -f "$RESP" 2>/dev/null ;;
+esac
+# 证书文件变了就重建（-nt 内建，不 fork）
+if [ -f "$RESP" ]; then
+    for _f in "$CERTDIR"/*; do
+        [ -f "$_f" ] && [ "$_f" -nt "$RESP" ] && { rm -f "$RESP" 2>/dev/null; break; }
+    done
+fi
+if [ -s "$RESP" ]; then
+    cat "$RESP" 2>/dev/null
+else
+    build_resp
+    if [ -s "$RESP" ]; then
+        cat "$RESP" 2>/dev/null
+    else
+        cors
+        printf '{"https":{},"mitm":{},"error":"build failed"}\n'
+    fi
+fi
