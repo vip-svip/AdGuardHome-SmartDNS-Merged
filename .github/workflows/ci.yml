@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  MODULE_DIR: Adguardhome
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 版本号一致性
+        run: |
+          set -e
+          V=$(grep -m1 '^version=' "$MODULE_DIR/module.prop" | cut -d= -f2)
+          VC=$(grep -m1 '^versionCode=' "$MODULE_DIR/module.prop" | cut -d= -f2)
+          case "$VC" in ''|*[!0-9]*) echo "versionCode 非整数: $VC"; exit 1 ;; esac
+          [ "$V" = "$VC" ] || { echo "version($V) != versionCode($VC)"; exit 1; }
+          [ ${#V} -eq 8 ] || { echo "版本号应为 YYYYMMDD: $V"; exit 1; }
+          # update.json 必须与本仓库同版本，否则模块内「检查更新」会指向旧包/别人的包
+          UV=$(python3 -c 'import json;print(json.load(open("update.json"))["version"])')
+          UVC=$(python3 -c 'import json;print(json.load(open("update.json"))["versionCode"])')
+          [ "$UV" = "$V" ] || { echo "update.json.version($UV) != module.prop version($V)"; exit 1; }
+          [ "$UVC" = "$VC" ] || { echo "update.json.versionCode($UVC) != $VC"; exit 1; }
+          grep -q 'vip-svip/AdGuardHome-SmartDNS-Merged' update.json \
+            || { echo "update.json 的 zipUrl/changelog 必须指向本仓库"; exit 1; }
+
+      - name: 只允许一棵模块树
+        run: |
+          set -e
+          if [ -d module ]; then
+            echo "检测到旧的 module/ 目录：构建树只能是 $MODULE_DIR/，否则发版会打包旧代码"; exit 1
+          fi
+
+      - name: 关键文件与二进制
+        run: |
+          set -e
+          for f in module.prop service.sh customize.sh uninstall.sh bin/AdGuardHome bin/dnsenc bin/AdGuardHome.yaml; do
+            [ -e "$MODULE_DIR/$f" ] || { echo "缺少 $MODULE_DIR/$f"; exit 1; }
+          done
+          for b in bin/AdGuardHome bin/dnsenc; do
+            head -c 4 "$MODULE_DIR/$b" | grep -q ELF || { echo "$MODULE_DIR/$b 不是 ELF"; exit 1; }
+            file "$MODULE_DIR/$b" | grep -q 'ARM aarch64' || echo "WARN: $b 架构不是 aarch64"
+          done
+          # 运行期缓存不应入库
+          if git ls-files "$MODULE_DIR" | grep -qE 'bin/data/|rules/subscriptions/|smartdns/(var|run|tmp)/'; then
+            echo "运行期缓存被提交进仓库了，请 git rm --cached"; exit 1
+          fi
+
+      - name: sh -n
+        run: |
+          set -e
+          for f in "$MODULE_DIR"/*.sh "$MODULE_DIR"/scripts/*.sh; do
+            [ -f "$f" ] || continue
+            sh -n "$f" && echo "OK $f"
+          done
+
+      - name: ShellCheck（error 级）
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          find "$MODULE_DIR" -name '*.sh' -print0 | xargs -0 shellcheck -S error -e SC1090,SC1091

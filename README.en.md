@@ -39,8 +39,11 @@ App → AGH:53 (nat hijack) → SmartDNS:6053 → dnsenc:6054 → encrypted upst
 1. Disable or uninstall other ad-blocking modules, accessibility skip tools, VPN ad blockers
 2. Flash this module zip in Magisk / KernelSU
 3. After reboot, access the Web UI:
-   - AdGuard Home panel: `http://127.0.0.1:53`
-   - SmartDNS panel: `http://127.0.0.1:6053`
+   - AdGuard Home panel: `http://127.0.0.1:40251` (user `root`, password in `scripts/config.prop`)
+   - SmartDNS panel: `http://127.0.0.1:6080`
+   - Upstream manager / scripts page: `http://127.0.0.1:6081` (LAN access gated by `panel_lan_only`)
+
+> `53` is the post-hijack DNS entry point and `6053` is SmartDNS's DNS port; neither is a panel address.
 
 ## Uninstall
 
