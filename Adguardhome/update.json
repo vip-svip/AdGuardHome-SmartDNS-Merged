@@ -1,6 +1,6 @@
 {
-  "version": "20261202",
-  "versionCode": 20261202,
-  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261202/AdGuardHome-SmartDNS-Merged-20261202.zip",
-  "changelog": "[20261202] 隐私页彻底停掉自动刷新：删掉两处自动核对（进页面 900ms 回 GET、切回前台再 GET），读取失败也不再整页画成「已关闭」——这正是「别的开关关一下再打开、DNS/VPN/IP 三个不翻」的根因。8 个开关现在同一套逻辑，页面静置后状态不再自变（实测 1200ms 与 4500ms 两帧字节级一致）。新增 6081 根入口 http://127.0.0.1:6081/ ：每次进入带毫秒时间戳跳转，物理上不可能命中旧缓存；直连 privacy.html 也会自动跳免缓存页（CGI + no-store）。移除页面上两个必须异步纠正的引擎开关，并在 --apply 里幂等关闭对应引擎。自检 full_check 126 项全绿（新增：无自动核对、根入口跳转、构建号自证；修复「面板端口 DROP」在 A/B 换链窗口的假 FAIL）"
+  "version": "20261203",
+  "versionCode": 20261203,
+  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261203/AdGuardHome-SmartDNS-Merged-20261203.zip",
+  "changelog": "[20261203] 隐私页彻底停掉自动刷新：删掉两处自动核对（进页面 900ms 回 GET、切回前台再 GET），读取失败也不再整页画成「已关闭」——这正是「别的开关关一下再打开、DNS/VPN/IP 三个不翻」的根因。8 个开关现在同一套逻辑，页面静置后状态不再自变（实测 1200ms 与 4500ms 两帧字节级一致）。新增 6081 根入口 http://127.0.0.1:6081/ ：每次进入带毫秒时间戳跳转，物理上不可能命中旧缓存；直连 privacy.html 也会自动跳免缓存页（CGI + no-store）。移除页面上两个必须异步纠正的引擎开关，并在 --apply 里幂等关闭对应引擎。自检 full_check 126 项全绿（新增：无自动核对、根入口跳转、构建号自证；修复「面板端口 DROP」在 A/B 换链窗口的假 FAIL）"
 }

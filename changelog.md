@@ -1,3 +1,10 @@
+## 20261203
+- **证书子系统整体移除**（按使用方要求）：模块不再生成、安装、覆盖任何自签 CA。删掉 `certs/`（两套 CA + 私钥 + meta + cacerts overlay 源）、`scripts/certs_install.sh`、`cgi-bin/certs` 证书页接口、`bin/aghmitm`（15.9MB）与 `scripts/rewrite/`（MITM 重写规则），安装脚本里那段 `unzip certs/*` + `MODDIR=... certs_install.sh` 也一并去掉
+- **MITM 链路一并拆除**：`iptables.sh` 去掉 `mitm_uids` / `mitm_selfheal` / `mitm_redirect_apply` / `mitm_proc_guard` 四个函数与全部调用点，不再给任何 uid 的 443 做 REDIRECT 到 8899、不再给 v6 443 发 tcp-reset；开机 `service.sh` 不再拉起 aghmitm、不再释放 rewrite 默认脚本；`cgi-bin/mitm` 运行时接口删除
+- **系统信任库回到原厂状态**：开机不再 mount tmpfs 覆盖 `/system/etc/security/cacerts`，卸载后 125 张原厂 CA 完整，App/WebView 不再因为信任库被替换而报证书错误（真机实测 Quetta 打开 https://www.baidu.com 直接正常，无任何警告）
+- **脚本页与 MITM 解耦**：`cgi-bin/scripts` 的脚本库目录从 `scripts/rewrite` 改为 `/data/adb/agh/scriptlib`，内置清单 `catalog/rewrite` 保留（那是可添加的脚本索引，不是 MITM 规则）；脚本页仍可列表/启停/生成 AGH 拦截规则
+- **自检同步**：full_check 去掉 aghmitm/证书/信任库相关断言，改为反向校验「8899 不该监听」「cacerts 不该被覆盖」「系统里不该再有模块 CA」
+
 ## 20261202
 - **证书警告的第二层根因**：光修目录权限不够。开机早期 `chcon` 会被策略挡下来，注入完成后文件 SELinux 标签停在默认的 `u:object_r:tmpfs:s0`，untrusted_app 读这些文件被拒 —— 系统信任库对 App 仍然是空的。现在统一用 `restorecon -RF`（走 policy 的 file_contexts，比 chcon 稳）收口，做「异常计数 + 最多 3 次重试」，再挂一个 25 秒延迟复核兜底
 - 真机证据：修前 `su 2000 -c "ls /system/etc/security/cacerts"` 直接 Permission denied、`ls -lZ` 是 `u:object_r:tmpfs:s0`；修后 app uid 10106 能读 1224 字节的 mitm-ca、能列出 127 张

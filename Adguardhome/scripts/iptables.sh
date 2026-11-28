@@ -1071,62 +1071,6 @@ rebuild_rules_raw() {
 IPT_LOCK="$AGH_DIR/.ipt.lock"
 # VPN 隧道内的 DNS 也要进 AGH：tun/wg 侧的 53 一律 REDIRECT 到 AGH 端口，
 # 这样 Clash/V2Ray 这类 tun 客户端替应用解析时，广告域名照样被 AGH 拦掉。
-# 应用级透明分流：mitm_uids.txt 里的 uid，其 443 直接 REDIRECT 到 aghmitm（127.0.0.1:8899）
-# 放在 OUTPUT 最前面，先于 DNS/SNI 链，保证这些应用的 TLS 走 MITM 解密
-mitm_uids() {
-    _f=/data/adb/agh/mitm_uids.txt
-    [ -f "$_f" ] || return 0
-    grep -oE '^[0-9]+' "$_f" 2>/dev/null | sort -u | tr '\n' ' '
-}
-# 自愈：MITM 开关是开的（mitm_on 存在）但接管名单为空时，
-# 443 没有任何一条 REDIRECT，MITM 等于没开（日志照样刷 rules loaded）。
-# 这里按「浏览器/客户端类应用」播种一次，保证开关状态与实际接管一致。
-mitm_selfheal() {
-    [ -f /data/adb/agh/mitm_on ] || return 0
-    [ -s /data/adb/agh/mitm_uids.txt ] && return 0
-    _c=/data/adb/agh/.pm_uids
-    [ -s "$_c" ] || pm list packages -U 2>/dev/null \
-        | sed -n 's/^package:\([^ ]*\) uid:\([0-9]*\).*/\1 \2/p' > "$_c" 2>/dev/null
-    [ -s "$_c" ] || return 0
-    awk '$1 ~ /(chrome|chromium|firefox|browser|quark|ucmobile|ucweb|mtt|searchbox|via|emmx|sbrowser|brave|opera|vivaldi|webview)/ {
-        print $2
-    }' "$_c" 2>/dev/null | sort -u > /data/adb/agh/mitm_uids.txt.t 2>/dev/null
-    if [ -s /data/adb/agh/mitm_uids.txt.t ]; then
-        mv -f /data/adb/agh/mitm_uids.txt.t /data/adb/agh/mitm_uids.txt 2>/dev/null
-    else
-        rm -f /data/adb/agh/mitm_uids.txt.t 2>/dev/null
-    fi
-}
-mitm_redirect_apply() {
-    mitm_selfheal    # 幂等增删：只删「名单里已不存在」的规则，只补「缺失」的规则。
-    # 早期实现是每次重建都先全删再加，导致守护每 5 秒抖动一次 iptables，
-    # 计数器被清零（实测 nat 计数一直读到 0），也白白增加内核开销。
-    _want=" $(mitm_uids) "
-    iptables $IPT_W -t nat -L OUTPUT -n --line-numbers 2>/dev/null \
-        | awk '$0 ~ /8899/ {print $1" "$0}' | while read -r _n _rest; do
-        _u=$(echo "$_rest" | sed -n 's/.*uid-owner \([0-9][0-9]*\).*/\1/p'; echo "$_rest" | sed -n 's/.*UID match \([0-9][0-9]*\).*/\1/p' | head -1)
-        [ -n "$_u" ] || continue
-        case "$_want" in *" $_u "*) ;; *) iptables $IPT_W -t nat -D OUTPUT "$_n" 2>/dev/null ;; esac
-    done
-    ip6tables $IPT_W -t filter -L OUTPUT -n --line-numbers 2>/dev/null \
-        | awk '$0 ~ /reject-with tcp-reset/ {print $1" "$0}' | while read -r _n _rest; do
-        _u=$(echo "$_rest" | sed -n 's/.*uid-owner \([0-9][0-9]*\).*/\1/p'; echo "$_rest" | sed -n 's/.*UID match \([0-9][0-9]*\).*/\1/p' | head -1)
-        [ -n "$_u" ] || continue
-        case "$_want" in *" $_u "*) ;; *) ip6tables $IPT_W -t filter -D OUTPUT "$_n" 2>/dev/null ;; esac
-    done
-    for _u in $(mitm_uids); do
-        case "$_u" in ""|*[!0-9]*) continue ;; esac
-        # 注意：部分 ROM 的 iptables -C 对不存在的规则也返回 0（stderr 报 No chain/target/match），
-        # 信退出码会让 `||` 短路、-I 永远不执行。改用 -S 快照判断存在性。
-        _has=$(iptables $IPT_W -t nat -S OUTPUT 2>/dev/null | grep -c -- "--uid-owner $_u .*--dport 443 -j REDIRECT --to-ports 8899")
-        [ "${_has:-0}" -gt 0 ] || \
-            iptables $IPT_W -t nat -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REDIRECT --to-ports 8899 2>/dev/null
-        # 本机无 ip6tables nat：同 uid 的 v6 443 直接 RST，逼其回落 IPv4 再被接管
-        _has6=$(ip6tables $IPT_W -t filter -S OUTPUT 2>/dev/null | grep -c -- "--uid-owner $_u .*--dport 443 -j REJECT --reject-with tcp-reset")
-        [ "${_has6:-0}" -gt 0 ] || \
-            ip6tables $IPT_W -t filter -I OUTPUT 1 -m owner --uid-owner "$_u" -p tcp --dport 443 -j REJECT --reject-with tcp-reset 2>/dev/null
-    done
-}
 
 vpn_dns_hijack() {
     _vifs=$(vpn_ifaces 2>/dev/null)
@@ -1226,7 +1170,6 @@ if [ $ONCE -eq 1 ] || [ $V6ONLY -eq 1 ]; then
         rm -rf "$IPT_LOCK" 2>/dev/null
     else
         rebuild_rules
-    mitm_redirect_apply
     fi
     exit 0
 fi
@@ -1235,7 +1178,7 @@ _sweep_daemon
 
 # 日志轮转：>2MB 时保留尾部 256KB，原地截断（同一 inode，写入进程的 O_APPEND fd 不受影响）
 rotate_logs() {
-    for _lg in "$AGH_DIR/mitm.log" "$AGH_DIR/bin/crash.log" "$AGH_DIR/agh.log" "$AGH_DIR/dnsenc.log"; do
+    for _lg in "$AGH_DIR/bin/crash.log" "$AGH_DIR/agh.log" "$AGH_DIR/dnsenc.log"; do
         [ -f "$_lg" ] || continue
         _lsz=$(wc -c < "$_lg" 2>/dev/null | tr -d ' ')
         [ "${_lsz:-0}" -gt 2097152 ] || continue
@@ -1246,40 +1189,6 @@ rotate_logs() {
     return 0
 }
 
-# aghmitm 进程守护（2026-11-27 真机实证：kill -9 之后 31 秒都没人拉起）
-# 后果不是「少个日志」：
-#   ① mitm_uids.txt 里的 uid 443 被 REDIRECT 到 127.0.0.1:8899，没人 listen → 那些应用直接连不上；
-#   ② SNI 的 NFQUEUE 只剩 --queue-bypass，443 全部直通 → SNI/QUIC 拦截静默失效（日志照样安静）。
-# 这里每 5 秒看一次，不在就按 service.sh 的同一套参数拉起来；用 mkdir 锁避免与开机路径同时起两个。
-mitm_proc_guard() {
-    [ -f "$AGH_DIR/mitm_on" ] || return 0
-    [ -x "$BIN_DIR/aghmitm" ] || return 0
-    pgrep -f "$BIN_DIR/aghmitm" >/dev/null 2>&1 && return 0
-    _ml="$AGH_DIR/.mitm.start.lock"
-    if ! mkdir "$_ml" 2>/dev/null; then
-        # 别的进程正在拉（开机路径或上一轮守护），交给它；锁超过 30 秒还在就当持锁进程
-        # 已死强拆，下一轮再拉（绝不因为一个残留锁让 aghmitm 永远起不来）。
-        _lts=$(cat "$_ml/ts" 2>/dev/null)
-        _now=$(date +%s)
-        if [ -n "$_lts" ] && [ $(( _now - _lts )) -gt 30 ]; then
-            rm -rf "$_ml"
-        fi
-        return 0
-    fi
-    date +%s > "$_ml/ts" 2>/dev/null
-    if pgrep -f "$BIN_DIR/aghmitm" >/dev/null 2>&1; then
-        rmdir "$_ml" 2>/dev/null; rm -rf "$_ml"; return 0
-    fi
-    _md=$(awk '/^dns:/{f=1} f&&/^[[:space:]]+port:/{print $2; exit}' "$AGH_DIR/bin/AdGuardHome.yaml" 2>/dev/null)
-    case "$_md" in ''|*[!0-9]*)
-        _md=$(grep -oE '^redir_port=[0-9]+' "$AGH_DIR/scripts/config.prop" 2>/dev/null | cut -d= -f2) ;;
-    esac
-    setsid "$BIN_DIR/aghmitm" -listen 127.0.0.1:8899 -rules "$AGH_DIR/scripts/rewrite" -dns "127.0.0.1:${_md:-5591}" >>"$AGH_DIR/mitm.log" 2>&1 &
-    echo "$(date +%s)" >> "$AGH_DIR/.mitm_restarts" 2>/dev/null
-    log_vpn "[WARN] aghmitm 不在，已自动拉起（listen 8899，dns 127.0.0.1:${_md:-5591}）"
-    rmdir "$_ml" 2>/dev/null; rm -rf "$_ml" 2>/dev/null
-    return 0
-}
 
 # 守护单例：本脚本没有 --daemon 参数解析，任何一次 `sh iptables.sh` 都会
 # 一路跑到下面的 while true，于是开机 service.sh、手动执行、旧残留会同时存在
@@ -1422,15 +1331,13 @@ while true; do
 
     # SNI 开关同步（仪表盘 sni_filter.enabled 驱动，5 秒一轮，状态不变不动 iptables）
     sni_sync
-    mitm_redirect_apply
     vpn_dns_hijack
 
     # ---- 日志轮转 ----
-    # 真机实测：mitm.log（aghmitm 每 5 秒打 rules loaded）+ bin/crash.log（AGH 自己
+    # 真机实测：bin/crash.log（AGH 自己
     # 的日志，SNI 计数器每分钟一条）都只写不轮转，长开机几天就上 MB。
     # 每 12 轮（约 60 秒）查一次，超过 2MB 就「保留尾部 256KB + 原地截断」——
     # 原地 cat 写同一 inode，进程的 O_APPEND fd 继续追加，不需要重启任何进程。
-    mitm_proc_guard
     if [ $(( ${_tick:-0} % 12 )) -eq 0 ]; then
         rotate_logs
     fi

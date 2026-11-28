@@ -116,8 +116,7 @@ domains_of() {
 
 count_reject() { grep -icE 'reject|url[ -]reject|address=/' "$DIR/$1" 2>/dev/null; }
 
-# 模块/插件里 [Script] 段用 script-path 引用的 JS 要落到 js/ 子目录，
-# aghmitm 才会加载并按模块里的 URL 正则执行。
+# 模块/插件里 [Script] 段用 script-path 引用的 JS 统一下载到 js/ 子目录留档。
 fetch_js() {
     _jf="$DIR/$1"
     [ -f "$_jf" ] || return 0
@@ -144,27 +143,8 @@ fetch_js() {
         else rm -f "$DIR/js/$_jb" 2>/dev/null; fi
     done
     rm -f "$_lst" 2>/dev/null
-    reload_mitm
 }
 
-# MITM 在跑时重启一次，让新加的 JS 立刻生效（不在跑就不动）
-reload_mitm() {
-    [ -f /data/adb/agh/mitm_on ] || return 0
-    pidof aghmitm >/dev/null 2>&1 || return 0
-    pidof aghmitm | xargs -r kill 2>/dev/null
-    sleep 1
-    # AGH 运行配置在 /data/adb/agh/bin/，modules/ 下那份只是模板（端口可能已漂移）
-    _dp=$(awk '/^dns:/{f=1} f&&/^[[:space:]]+port:/{print $2; exit}' /data/adb/agh/bin/AdGuardHome.yaml 2>/dev/null)
-    case "$_dp" in ''|*[!0-9]*)
-        _dp=$(netstat -tlnup 2>/dev/null | grep AdGuardHome | grep udp | sed -n 's/.*[:.]\([0-9]*\) .*/\1/p' | head -1) ;;
-    esac
-    case "$_dp" in ''|*[!0-9]*)
-        _dp=$(grep -oE '^redir_port=[0-9]+' /data/adb/agh/scripts/config.prop 2>/dev/null | cut -d= -f2) ;;
-    esac
-    setsid /data/adb/modules/AdGuardHome/bin/aghmitm -listen 127.0.0.1:8899 \
-        -rules /data/adb/agh/scripts/rewrite -dns "127.0.0.1:${_dp:-5591}" \
-        >>/data/adb/agh/mitm.log 2>&1 &
-}
 
 js_count() {
     _jc=0

@@ -270,15 +270,14 @@ unzip -oq "$ZIPFILE" "scripts/*" -d "$AGH_DIR"
 # 脚本同时落到模块目录（KernelSU 卸载/管理页都按模块目录找）
 # webui 必须每次都从 zip 解出来：$MODPATH 下的旧副本会覆盖 $AGH_DIR 里的新文件
 # 历史 bug：这里只解了 sd-restart.sh / iptables.sh 两个文件，模块目录里没有
-# certs_install.sh / vpn_dns_sync.sh / ModuleMOD.sh / ProxyConfig.sh / sni_filter.awk /
-# config.prop —— cgi-bin/certs 的 `$MODDIR/scripts/certs_install.sh` 那条路径恒假，
-# 只能靠 $AGH_DIR 兜底；模块目录也就不是自包含的。现在整包 scripts/* 都解。
+# vpn_dns_sync.sh / ModuleMOD.sh / ProxyConfig.sh / sni_filter.awk / config.prop
+# —— 模块目录也就不是自包含的。现在整包 scripts/* 都解。
 unzip -oq "$ZIPFILE" "scripts/*" -d "$MODPATH" 2>/dev/null
 chmod 755 "$MODPATH"/scripts/*.sh 2>/dev/null
 chmod 644 "$MODPATH"/scripts/config.prop "$MODPATH"/scripts/sni_filter.awk 2>/dev/null
 chmod 755 "$MODPATH"/scripts/webui/cgi-bin/* 2>/dev/null
 unzip -oq "$ZIPFILE" "bin/*" -d "$AGH_DIR"
-chmod 755 "$MODPATH"/bin/AdGuardHome "$MODPATH"/bin/aghmitm "$MODPATH"/bin/dnsenc 2>/dev/null
+chmod 755 "$MODPATH"/bin/AdGuardHome "$MODPATH"/bin/dnsenc 2>/dev/null
 mkdir -p "$BIN_DIR/data" "$MODPATH/rules" "$MODPATH/rules/subscriptions"
 # 数据目录里的规则目录改为指向模块根目录的软链接，让"我添加的规则"和
 # "网络订阅下载的规则"都真实落在模块根目录里（AGH 只是通过这些路径读写它们）。
@@ -375,34 +374,8 @@ fi
 chmod 644 "$MODPATH/hosts/hosts" 2>/dev/null
 
 # ---- 证书目录 ----
-# $MODDIR/certs 同时被三处使用：certs 管理页（cgi-bin/certs）、开机 service.sh 里的
-# certs_install.sh、以及 system/etc/security/cacerts 的 overlay 源头。
-# 旧版 customize.sh 从没把 certs/ 解到 $MODPATH，安装末尾那次 certs_install 调用因为
-# 找不到脚本被静默跳过，重刷后模块目录里没有 certs/ → 系统 CA overlay 丢失、证书页空。
-# 这里补上，并且用「旧目录优先」覆盖：设备上已生成的 CA 一旦被包内模板顶掉，
-# 之前装过这张 CA 的 App/系统信任库就全部失效。
-i18n_print "- Extracting built-in CA / cert store" "- 正在解压内置证书"
-mkdir -p "$MODPATH/certs"
-if [ -d "$ADGPATH/certs" ] && [ ! "$ADGPATH" = "$MODPATH" ]; then
-    cp -rf "$ADGPATH/certs/." "$MODPATH/certs/" 2>/dev/null
-fi
-unzip -oq "$ZIPFILE" "certs/*" -d "$MODPATH" >/dev/null 2>&1
-if [ -d "$ADGPATH/certs" ] && [ ! "$ADGPATH" = "$MODPATH" ]; then
-    cp -rf "$ADGPATH/certs/." "$MODPATH/certs/" 2>/dev/null
-fi
-chmod 644 "$MODPATH"/certs/*.crt 2>/dev/null
-chmod 600 "$MODPATH"/certs/*.key 2>/dev/null
-# 安装阶段的 CA 注入：脚本本体只解到 $AGH_DIR/scripts，$MODPATH/scripts 里没有它，
-# 所以两个位置都试，MODDIR 始终指向正在安装的 $MODPATH。
-_cert_installer=""
-for _ci in "$MODPATH/scripts/certs_install.sh" "$AGH_DIR/scripts/certs_install.sh"; do
-    [ -f "$_ci" ] && { _cert_installer="$_ci"; break; }
-done
-if [ -n "$_cert_installer" ]; then
-    MODDIR="$MODPATH" sh "$_cert_installer" 2>&1 | while read -r _l; do ui_print "$_l"; done
-else
-    ui_print "- WARN: certs_install.sh not found, CA overlay skipped"
-fi
+# 2026-11-28：模块不再安装任何自签 CA。certs/ 解压、cacerts overlay 生成、
+# 安装期 certs_install.sh 调用全部移除，系统信任库保持原厂状态。
 
 # 升级前备份用户的 SmartDNS 配置（含自加的上游服务器），解压后恢复
 SD_ETC="$AGH_DIR/smartdns/etc/smartdns"

@@ -109,7 +109,7 @@ fi
 
 hdr "1. 进程与监听端口"
 RP=$(prop redir_port)
-for p in AdGuardHome smartdns dnsenc aghmitm; do
+for p in AdGuardHome smartdns dnsenc; do
     pidof "$p" >/dev/null 2>&1 && ok "$p 在跑" || bad "$p 不在"
 done
 proc_httpd() { pgrep -f 'httpd -p' >/dev/null 2>&1; }
@@ -117,7 +117,7 @@ proc_httpd && ok "6081 httpd 在跑" || bad "6081 httpd 不在"
 for t in 40251 6080 6081 6054; do
     netstat -tln 2>/dev/null | _gr -q ":$t " && ok "tcp/$t 监听" || bad "tcp/$t 未监听"
 done
-netstat -tln 2>/dev/null | _gr -q "127.0.0.1:8899" && ok "tcp/8899(本机) 监听" || bad "tcp/8899 未监听"
+netstat -tln 2>/dev/null | _gr -q "127.0.0.1:8899" && bad "8899 还在监听（MITM 已移除，不该再起）" || ok "8899 未监听（MITM 已移除）"
 for u in $RP 6053 6054; do
     netstat -uln 2>/dev/null | _gr -q ":$u " && ok "udp/$u 监听" || bad "udp/$u 未监听"
 done
@@ -236,7 +236,7 @@ for _r in 1 2 3; do
 done
 [ "${NQ:-0}" -ge 11 ] && ok "NFQUEUE 条目 ${NQ} 条（443/80 等）" || bad "NFQUEUE 条目只有 ${NQ} 条（期望 11，SNI 在裸奔）"
 iptables -S AGH_SNI 2>/dev/null | _gr -q -- '--dport 443 -j NFQUEUE' && ok "443 走 NFQUEUE" || bad "443 没走 NFQUEUE"
-pidof aghmitm >/dev/null 2>&1 && ok "NFQUEUE 消费者（aghmitm）在跑" || bad "NFQUEUE 没有消费者，443 会被 bypass"
+pidof aghmitm >/dev/null 2>&1 && bad "aghmitm 仍在跑（MITM 已移除）" || ok "aghmitm 未运行（MITM 已移除）"
 # 原子性回归：强制跑一次 --once 重建，全程 200ms 采样，拦截条数必须始终 ≥11。
 # 旧实现（-F 后原地重灌）实测会掉到 0~5，等于每次自愈都有 100~300ms SNI 裸奔。
 if [ -f "$AGH_DIR/scripts/iptables.sh" ]; then
@@ -308,19 +308,12 @@ for n in https mitm; do
     C="$MODDIR/certs/$n-ca.crt"
     [ -s "$C" ] && ok "$n CA 在模块目录（$(wc -c < "$C" | tr -d ' ')B）" || bad "$n CA 缺失：$C"
 done
-H1=2c637461; H2=e2b6a4fd
-for h in $H1 $H2; do
-    [ -f "/system/etc/security/cacerts/$h.0" ] && ok "系统信任库有 $h.0" || bad "系统信任库缺 $h.0（TLS 拦截会失败）"
-    [ -f "$MODDIR/system/etc/security/cacerts/$h.0" ] && ok "模块 overlay 有 $h.0" || bad "模块 overlay 缺 $h.0（重启后会掉）"
-done
-[ -s "/system/etc/security/cacerts/$H1.0" ] && [ -s "$MODDIR/certs/https-ca.crt" ] && {
-    a=$(md5sum "/system/etc/security/cacerts/$H1.0" 2>/dev/null | cut -d' ' -f1)
-    b=$(md5sum "$MODDIR/certs/https-ca.crt" 2>/dev/null | cut -d' ' -f1)
-    [ "$a" = "$b" ] && ok "系统里的 https CA 与模块内一致" || bad "系统 https CA 与模块内不一致（装机注入的是旧证书）"
-}
-for d in https mitm; do
-    code=$(curl -s -o /dev/null -w '%{http_code}' "http://$HOST:6081/cgi-bin/certs?download=$d" 2>/dev/null)
-    [ "$code" = "200" ] && ok "certs?download=$d 可下载" || bad "certs?download=$d 返回 $code"
+# 2026-11-28：信任库/证书检查已随证书子系统一起移除。系统 CA 应为原厂快照，
+# 这里只确认模块没有往信任库塞东西。
+MP=$(mount | _gr -c "security/cacerts")
+[ "${MP:-0}" = "0" ] && ok "cacerts 未被模块 tmpfs 覆盖" || bad "cacerts 仍被覆盖（证书子系统残留）"
+for h in 2c637461 e2b6a4fd; do
+    [ -f "/system/etc/security/cacerts/$h.0" ] && bad "系统信任库仍有模块 CA $h.0" || ok "系统信任库无模块 CA $h.0"
 done
 
 hdr "9. 目录与标志"
@@ -333,18 +326,18 @@ done
 ok "cgi-bin 无 immutable 锁"
 UP=$(ls -A /data/adb/modules_update/AdGuardHome 2>/dev/null | wc -l | tr -d ' ')
 [ "${UP:-0}" = "0" ] && ok "modules_update 已清空（上次刷包已切换）" || bad "modules_update 还有 $UP 个条目（刷包没生效）"
-for f in privacy scripts apps certs mitm; do
+for f in privacy scripts apps upstream; do
     a=$(md5sum "$AGH_DIR/scripts/webui/cgi-bin/$f" 2>/dev/null | cut -d' ' -f1)
     b=$(md5sum "$MODDIR/scripts/webui/cgi-bin/$f" 2>/dev/null | cut -d' ' -f1)
     [ -n "$a" ] && [ "$a" = "$b" ] && ok "两处副本一致：$f" || bad "两处副本不一致：$f（$a vs $b）"
 done
-for b in "$AGH_DIR/bin/AdGuardHome" "$AGH_DIR/bin/aghmitm" "$AGH_DIR/bin/dnsenc"; do
+for b in "$AGH_DIR/bin/AdGuardHome" "$AGH_DIR/bin/dnsenc"; do
     [ -x "$b" ] && ok "可执行：${b#$AGH_DIR/}" || bad "不可执行：${b#$AGH_DIR/}（chmod 丢了）"
 done
-for s in certs_install.sh vpn_dns_sync.sh iptables.sh ModuleMOD.sh; do
+for s in vpn_dns_sync.sh iptables.sh ModuleMOD.sh; do
     [ -x "$AGH_DIR/scripts/$s" ] && ok "脚本可执行且存在：$s" || bad "缺或不可执行：scripts/$s"
 done
-for s in certs_install.sh vpn_dns_sync.sh iptables.sh; do
+for s in vpn_dns_sync.sh iptables.sh; do
     [ -f "$MODDIR/scripts/$s" ] && ok "模块目录自包含：scripts/$s" || bad "模块目录缺 scripts/$s（不是自包含的）"
 done
 

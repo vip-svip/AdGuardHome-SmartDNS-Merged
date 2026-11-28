@@ -232,12 +232,12 @@ find "$ADGPATH" -type f -name "*.sh" -exec chattr -i {} \; 2>/dev/null
 
 # 权限自愈：老版本的包只给 sd-restart.sh / iptables.sh 赋了 755，其余脚本和
 # bin/ 下三个二进制靠 unzip 的 umask，某些 KernelSU/Magisk 版本会丢 exec 位
-# （真机实测 aghmitm / certs_install.sh 装完是 644），表现是「进程起不来、
-# 证书装不上，但面板和日志一切正常」。每次开机无条件补齐。
-for _h in "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/certs_install.sh; do
+# （真机实测个别脚本装完是 644），表现是「脚本起不来，但面板和日志一切正常」。
+# 每次开机无条件补齐。
+for _h in "$SCRIPT_DIR"/*.sh; do
     [ -f "$_h" ] && chmod 755 "$_h" 2>/dev/null
 done
-for _h in "$BIN_DIR"/AdGuardHome "$BIN_DIR"/aghmitm "$BIN_DIR"/dnsenc; do
+for _h in "$BIN_DIR"/AdGuardHome "$BIN_DIR"/dnsenc; do
     [ -f "$_h" ] && chmod 755 "$_h" 2>/dev/null
 done
 for _h in "$SCRIPT_DIR"/webui/cgi-bin/*; do
@@ -287,7 +287,7 @@ smartdns_running() { pgrep -f '/usr/local/lib/smartdns/smartdns' >/dev/null 2>&1
 # DNS 端口分配（仅在 AGH 未运行时——避免重启时把正在用的端口改掉）
 #
 # 旧实现每次开机随机 30000-65535：与「端口固定 5591 防漂移」的设计目标自相矛盾，
-# 端口一变，vpn_dns_sync 注入的 nameserver、aghmitm -dns、面板排查记录全部对不上；
+# 端口一变，vpn_dns_sync 注入的 nameserver、dnsenc -listen、面板排查记录全部对不上；
 # 而且随机区间与内核临时端口段（32768-60999）重叠，REDIRECT 偶尔会撞上已占用端口。
 #
 # 现在改成确定性分配：优先 redir_port（默认 5591），被占用才向后顺延探测，
@@ -1039,43 +1039,8 @@ ensure_querylog_off() {
 ensure_querylog_off
 
 # 应用隐私防护规则（防 DNS/VPN/IP 泄露，配置在 /data/adb/agh/privacy.conf）
-# 系统级 CA 幂等安装（HTTP S / MITM），保证 overlay 每次开机都在位
-# ---- 内置默认脚本：缺失即释放 ----
-# 目的：脚本页首次打开就有可用条目，而不是空表；用户可停用/删除，不会反复覆盖。
-_REWRITE_DIR="$AGH_DIR/scripts/rewrite"
-mkdir -p "$_REWRITE_DIR" 2>/dev/null
-if [ ! -f "$_REWRITE_DIR/default.rewrite" ]; then
-    for _src in "$AGH_DIR/scripts/rewrite/default.rewrite" "$MODDIR/scripts/rewrite/default.rewrite" \
-                "/data/adb/modules/AdGuardHome/scripts/rewrite/default.rewrite"; do
-        [ -f "$_src" ] && { cp -f "$_src" "$_REWRITE_DIR/default.rewrite" 2>/dev/null; break; }
-    done
-fi
-if [ ! -f "$_REWRITE_DIR/privacy.rewrite" ]; then
-    for _src in "$AGH_DIR/scripts/rewrite/privacy.rewrite" "$MODDIR/scripts/rewrite/privacy.rewrite" \
-                "/data/adb/modules/AdGuardHome/scripts/rewrite/privacy.rewrite"; do
-        [ -f "$_src" ] && { cp -f "$_src" "$_REWRITE_DIR/privacy.rewrite" 2>/dev/null; break; }
-    done
-fi
-_certs_sh="$SCRIPT_DIR/certs_install.sh"
-[ -f "$_certs_sh" ] && sh "$_certs_sh" >/dev/null 2>&1 &
-# 改写脚本运行时：aghmitm（用模块内置 MITM CA 做 TLS 解密 + URL 重写）
-# 建 /data/adb/agh/mitm_on 后开机自启，监听 127.0.0.1:8899
-if [ -f "$AGH_DIR/mitm_on" ] && [ -x "$BIN_DIR/aghmitm" ]; then
-    # 与守护循环里的 mitm_proc_guard 共用一把启动锁，避免开机同时起两个（抢 8899）
-    _ml="$AGH_DIR/.mitm.start.lock"
-    if mkdir "$_ml" 2>/dev/null; then
-    date +%s > "$_ml/ts" 2>/dev/null
-    if ! pgrep -f "$BIN_DIR/aghmitm" >/dev/null 2>&1; then
-        _AGHD=$(awk '/^dns:/{f=1} f&&/^[[:space:]]+port:/{print $2; exit}' "$BIN_DIR/AdGuardHome.yaml" 2>/dev/null)
-        case "$_AGHD" in ''|*[!0-9]*)
-            _AGHD=$(netstat -tlnup 2>/dev/null | grep AdGuardHome | grep udp | sed -n 's/.*[:.]\([0-9]*\) .*/\1/p' | head -1) ;;
-        esac
-        case "$_AGHD" in ''|*[!0-9]*) _AGHD=$(grep -oE '^redir_port=[0-9]+' "$AGH_DIR/scripts/config.prop" 2>/dev/null | cut -d= -f2) ;; esac
-        setsid "$BIN_DIR/aghmitm" -listen 127.0.0.1:8899 -rules "$AGH_DIR/scripts/rewrite" -dns "127.0.0.1:${_AGHD:-5591}" >>"$AGH_DIR/mitm.log" 2>&1 &
-fi
-    rm -rf "$_ml" 2>/dev/null
-    fi
-fi
+# 2026-11-28：系统 CA 注入与 aghmitm（MITM）已整体移除，这里不再
+# 释放 rewrite 默认脚本、不再装 CA、不再拉起 8899 进程。
 _privacy_cgi="$SCRIPT_DIR/webui/cgi-bin/privacy"
 if [ -f "$_privacy_cgi" ]; then
     [ -f "$AGH_DIR/privacy.conf" ] || printf 'dns=1\nvpn=1\nip=1\nsb=0\npar=0\nntp=1\ndhcp=1\nsmb=1\ntcp=1\nsnmp=1\n' > "$AGH_DIR/privacy.conf" 2>/dev/null

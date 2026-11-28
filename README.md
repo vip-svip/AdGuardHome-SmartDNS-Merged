@@ -28,7 +28,7 @@
 | 目录 | 内容 |
 |---|---|
 | `Adguardhome/` | 模块主体（`service.sh` / `customize.sh` / `uninstall.sh` / `module.prop` / `action.sh`）——**唯一的构建树**，CI 与 `tools/release.py` 都从这里打包 |
-| `Adguardhome/bin/` | AdGuardHome（fork，含 SNI 过滤） + dnsenc + aghmitm arm64 二进制、`AdGuardHome.yaml` |
+| `Adguardhome/bin/` | AdGuardHome（fork，含 SNI 过滤） + dnsenc arm64 二进制、`AdGuardHome.yaml` |
 | `Adguardhome/rules/` | 内置过滤规则（广告/隐私/运营商/反诈/色情/水印等） |
 | `Adguardhome/scripts/` | 守护脚本组（iptables / NoAds / ProxyConfig / ModuleMOD / vpn_dns_sync / sni_filter.awk） + `webui/`（6081 管理页与 CGI） + `catalog/`（脚本页内置索引） |
 | `Adguardhome/smartdns/` | SmartDNS 二进制 + 配置 + 面板静态资源 |
