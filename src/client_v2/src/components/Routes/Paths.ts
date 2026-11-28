@@ -18,6 +18,7 @@ export const RoutePath = {
     TopBlockedDomains: 'TopBlockedDomains',
     TopUpstreams: 'TopUpstreams',
     UpstreamAvgTime: 'UpstreamAvgTime',
+    Privacy: 'Privacy',
 } as const;
 
 export type RoutePathKey = keyof typeof RoutePath;
@@ -42,6 +43,7 @@ export const Paths: Record<RoutePathKey, string> = {
     TopBlockedDomains: pathBuilder('top_blocked_domains'),
     TopUpstreams: pathBuilder('top_upstreams'),
     UpstreamAvgTime: pathBuilder('upstream_avg_time'),
+    Privacy: pathBuilder('privacy'),
 };
 
 export type LinkParams = Partial<Record<string, string | number>>;

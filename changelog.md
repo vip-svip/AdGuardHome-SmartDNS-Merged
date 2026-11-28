@@ -1,3 +1,14 @@
+## 20261213
+- **隐私页改成源码级重建，不再打二进制补丁**
+  - 新增 `src/client_v2/src/components/Privacy/`（`Privacy.tsx` + `Privacy.module.pcss`），在 `Paths.ts` 注册 `Privacy`，在 `App/index.tsx` 挂 `<Route>`，在 `Menu.tsx` 侧栏加「隐私」项（lock 图标，位于查询日志与 SmartDNS 之间）
+  - `bin/AdGuardHome` 由 `src/` 全量重编译得到：`npm run build-prod`（22 assets / 3,240,628B → `src/build/static`）+ `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -trimpath`，产物 23,396,512B（原 27,132,064B，差额是剥离符号表）
+- **根因**：原内嵌页 `const[e,t]=_({dns:!0,vpn:!0,...})` 全真初值 + `A(()=>{同步 XHR GET → r(JSON)})` 挂载后覆盖 → conf 里有 0 的项必然「先绿后灰」。dns/vpn/ip 恒为 1 所以看着不跳
+- **新写法**：`createSignal(readState())`——同步 XHR 放进 signal 初值，组件构造期就是真值，首帧即 conf；`toggle()` 只 `setState(next)` + 一次 POST，POST 回调不回写、无任何 effect 重新 GET
+- **键集**：固定 dns/vpn/ip/ntp/dhcp/smb/tcp/snmp 八个，`sb` / `par` 两个废键不再出现在前端请求体里
+- **页面形态（1:1 复刻原版）**：`<h1>隐私</h1>` + 8 个 `SettingRow(variant:switch, align:top, title, description)`（文案逐字照搬原版）+ 「泄露检测」4 个外链（browserleaks DNS / WebRTC / ipleak / 综合）+ 说明段落；不含恶意网站拦截、成人内容过滤、一键过检测
+- 实测：conf `ip=0 ntp=0 dhcp=0 tcp=0` 时打开隐私页，**页面出现的第一帧**（第 5 张采样）就是 IP/NTP/DHCP/TCP 全灰，开关列 hash `f8452d2c`，与第 5 秒的帧完全相同；点「防止明文协议泄露」后 220ms / 440ms / 2.4s 三帧 hash 全等 `B31F39D8`，`nchg=1`、请求体 `dns=1&vpn=1&ip=0&ntp=0&dhcp=0&smb=1&tcp=1&snmp=1`（无 sb/par）；三次强制停进程重开，开关列 hash 全等 `c545d6971c`
+- `bin/AdGuardHome` md5 `42eba74ed131fdf020dbb5e75a15df0b`（23,396,512B / aarch64 ELF）
+
 ## 20261212
 - **隐私开关「关一下再打开」真因找到并根治（改二进制）**
   - 内嵌前端原是 `const[e,t]=_({dns:!0,vpn:!0,...})` + `A(()=>{同步 XHR GET ... r(JSON)})`：首帧先按 8 项全真渲染，挂载后 GET 覆盖。**只要 conf 里有一项是 0，每次打开都「先绿后灰」** —— 这就是跳的来源；dns/vpn/ip 恒为 1 所以看着不跳

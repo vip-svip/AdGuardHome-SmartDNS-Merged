@@ -114,6 +114,17 @@ export const Menu = (props: Props) => {
                     </Link>
                 </div>
                 <div class={cn(s.menuLinkWrapper)}>
+                    <Link
+                        class={cn(s.menuLink, {
+                            [s.activeLink]: isActive(Paths.Privacy),
+                        })}
+                        to={RoutePath.Privacy}
+                    >
+                        <Icon class={s.linkIcon} icon="lock" />
+                        <span class={theme.common.textOverflow}>隐私</span>
+                    </Link>
+                </div>
+                <div class={cn(s.menuLinkWrapper)}>
                     <a
                         href="http://127.0.0.1:6080"
                         target="_blank"

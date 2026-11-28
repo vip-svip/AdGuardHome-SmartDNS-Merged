@@ -24,6 +24,7 @@ import s from './styles.module.pcss';
 import { DnsSettings } from '../DnsSettings';
 import { PrivateReverse } from '../DnsSettings/PrivateReverse';
 import { UserRules } from '../UserRules';
+import { Privacy } from '../Privacy/Privacy';
 import { Paths } from '../Routes/Paths';
 import {
     TopQueriedDomainsPage,
@@ -126,6 +127,7 @@ const App = () => {
             <Route path={Paths.CustomRules} component={UserRules} />
             <Route path={Paths.DnsRewrites} component={DNSRewrites} />
             <Route path={Paths.Logs} component={QueryLog} />
+            <Route path={Paths.Privacy} component={Privacy} />
             <Route path="/" component={() => <Navigate href="/dashboard" />} />
         </HashRouter>
     );
