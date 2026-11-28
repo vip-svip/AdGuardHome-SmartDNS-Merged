@@ -1,3 +1,9 @@
+## 20261202
+- **证书警告的第二层根因**：光修目录权限不够。开机早期 `chcon` 会被策略挡下来，注入完成后文件 SELinux 标签停在默认的 `u:object_r:tmpfs:s0`，untrusted_app 读这些文件被拒 —— 系统信任库对 App 仍然是空的。现在统一用 `restorecon -RF`（走 policy 的 file_contexts，比 chcon 稳）收口，做「异常计数 + 最多 3 次重试」，再挂一个 25 秒延迟复核兜底
+- 真机证据：修前 `su 2000 -c "ls /system/etc/security/cacerts"` 直接 Permission denied、`ls -lZ` 是 `u:object_r:tmpfs:s0`；修后 app uid 10106 能读 1224 字节的 mitm-ca、能列出 127 张
+- **update.json 长期不同步的根因**：`SKIPUNZIP=1` 自己解压但清单漏了 `update.json`，`$MODPATH/update.json` 压根不存在 → 后面的拷贝分支恒假，运行目录那份停在旧版本，自检永远报「version≠模块」。现在显式 `unzip update.json` 再走原逻辑
+- full_check 第 14 节扩到 7 条断言：目录 0755、目录标签、**文件标签全对**、非 root uid 可列举、两张模块 CA 在位
+
 ## 20261201
 - **修掉「所有 HTTPS 站点都弹证书不受信任」**：tmpfs 覆盖 `/system/etc/security/cacerts` 之后，挂载点的目录权限是 `0700`。uid≠0 的进程（所有 App / WebView / Chrome / 各家 SDK）根本打不开这个目录，系统信任库对它们等于空的 → 每个 HTTPS 站点都报证书错误。现在挂载后显式 `chmod 755`，并且在每次开机的「已挂载 → 核对清单」分支里幂等修正一次（tmpfs 每次开机重建，权限必然退回 0700，所以必须每次修）
 - 同时给模块 overlay 目录和 tmpfs 副本目录补齐 `0755`，文件保持 `0644`，SELinux 标签仍是 `u:object_r:system_security_cacerts_file:s0`

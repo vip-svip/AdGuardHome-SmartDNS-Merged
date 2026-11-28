@@ -583,6 +583,11 @@ done
 # 2) 模块根 update.json：KernelSU/Magisk 管理器「检查更新」直接读它。
 # 历史 bug：包里 update.json 已改，但运行目录那份是几版前手工留下的，
 # 自检永远报「update.json version≠模块」，看着像发版漏了，其实是没同步。
+# ------------------------------------------------------------------
+# 历史 bug 2：SKIPUNZIP=1 自己解压，但清单里漏了 update.json，
+# $MODPATH/update.json 根本不存在 → 下面的 if 恒假 → 运行目录那份一直是
+# 几版前手工留下的版本，自检永远报「update.json version≠模块」。
+unzip -oq "$ZIPFILE" "update.json" -d "$MODPATH" 2>/dev/null
 if [ -f "$MODPATH/update.json" ]; then
     cp -f "$MODPATH/update.json" "$AGH_DIR/update.json" 2>/dev/null
     mkdir -p /data/adb/modules/AdGuardHome 2>/dev/null

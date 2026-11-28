@@ -20,6 +20,45 @@ LOG=/data/adb/agh/certs_install.log
 
 log() { echo "$(date '+%F %T') $*" >>"$LOG" 2>/dev/null; }
 
+# ---- 标签/权限收口（本脚本所有路径共用）----
+# 真机实测（Android 17 / 一加 12）：开机早期 chcon 会被策略挡下来，
+# 注入完成后文件标签停在默认的 u:object_r:tmpfs:s0 —— SELinux 下 untrusted_app
+# 读不到这些文件，系统信任库对 App 等于空，于是每个 HTTPS 站点都弹证书不受信任。
+# restorecon 走 policy 的 file_contexts，比 chcon 稳；两者都跑，再校验一次。
+_cacerts_label_fix() {
+    chmod 755 "$SYS" 2>/dev/null
+    chmod 644 "$SYS"/* 2>/dev/null
+    chcon -R u:object_r:system_security_cacerts_file:s0 "$SYS" 2>/dev/null
+    restorecon -RF "$SYS" 2>/dev/null
+}
+_cacerts_bad() {
+    ls -Z "$SYS" 2>/dev/null \
+        | awk '$1 ~ /^u:object_r:/ && $1 !~ /system_security_cacerts_file/ {c++} END{print c+0}'
+}
+_cacerts_verify() {
+    _cacerts_label_fix
+    _bad=$(_cacerts_bad)
+    _i=0
+    while [ "${_bad:-0}" -gt 0 ] && [ "$_i" -lt 3 ]; do
+        sleep 2
+        _cacerts_label_fix
+        _bad=$(_cacerts_bad)
+        _i=$((_i + 1))
+    done
+    log "[certs] 标签/权限收口：异常文件=${_bad:-?}（0 为正常）"
+    # 开机十几秒内策略可能还没完全就绪，再挂一个延迟复核兜底
+    (
+        sleep 25
+        _cacerts_label_fix
+        _b=$(_cacerts_bad)
+        if [ "${_b:-0}" -gt 0 ]; then
+            log "[certs] 延迟复核仍异常：$_b 个文件标签不对"
+        else
+            log "[certs] 延迟复核通过：目录 755 / 文件 644 / 标签正确"
+        fi
+    ) >/dev/null 2>&1 &
+}
+
 [ -d "$SRC" ] || { log "[certs] 未找到内置仓库: $SRC"; exit 0; }
 
 # ---------- 通道 1：模块 overlay 目录 ----------
@@ -43,10 +82,7 @@ log "[certs] overlay 目录已就绪：$n 张 -> $DST"
 # 系统信任库对它们等于空 —— 表现就是「所有 HTTPS 站点都弹证书不受信任」。
 # 注意：必须放在任何 exit 之前，否则「信任库已含全部 CA」那条提前 return 会跳过它。
 if grep -q " $SYS " /proc/mounts 2>/dev/null; then
-    chmod 755 "$SYS" 2>/dev/null
-    chmod 644 "$SYS"/* 2>/dev/null
-    chcon -R u:object_r:system_security_cacerts_file:s0 "$SYS" 2>/dev/null
-    log "[certs] 信任库目录权限已校验（755 / 644 / 标签）"
+    _cacerts_verify
 fi
 
 need=0
@@ -62,11 +98,9 @@ fi
 
 # 已有 tmpfs 挂载 → 直接核对清单
 if mountpoint -q "$SYS" 2>/dev/null || grep -q " $SYS " /proc/mounts 2>/dev/null; then
-    # tmpfs 每次开机都是新目录，权限会退回 0700；0700 下普通 App 读不到任何 CA，
-    # 表现就是「所有 HTTPS 站点都弹证书不受信任」。这里每次都修正一次。
-    chmod 755 "$SYS" 2>/dev/null
-    chcon u:object_r:system_security_cacerts_file:s0 "$SYS" 2>/dev/null
-    chmod 644 "$SYS"/* 2>/dev/null
+    # tmpfs 每次开机都是新目录：权限退回 0700、文件标签退回 u:object_r:tmpfs:s0，
+    # 两者都会让普通 App 读不到 CA（表现就是所有 HTTPS 站弹证书错误），每次都收口一次。
+    _cacerts_verify
     cur=$(ls "$SYS" 2>/dev/null | wc -l | tr -d ' ')
     if [ -f "$SNAP/.count" ]; then
         base=$(cat "$SNAP/.count" 2>/dev/null | tr -d ' ')
@@ -130,12 +164,10 @@ mount -t tmpfs tmpfs "$SYS" 2>/dev/null || {
     exit 0
 }
 cp -a "$TMPD"/. "$SYS"/ 2>/dev/null
-chmod 644 "$SYS"/* 2>/dev/null
-# 关键：tmpfs 挂载点的目录权限是 0700，必须显式改成 0755，
-# 否则 uid!=0 的进程（所有 App / WebView / Chrome）根本打不开这个目录，
-# 系统信任库对它们等于空 —— 于是每个 HTTPS 站点都弹「证书不受信任」。
-chmod 755 "$SYS" 2>/dev/null
-chcon u:object_r:system_security_cacerts_file:s0 "$SYS" 2>/dev/null
+# 关键：tmpfs 挂载点的目录权限是 0700、文件 SELinux 标签是 u:object_r:tmpfs:s0。
+# 两者不修，uid!=0 的进程（所有 App / WebView / Chrome / SDK）都读不到 CA，
+# 系统信任库对它们等于空 —— 每个 HTTPS 站点都会弹「证书不受信任」。
+_cacerts_verify
 
 # 安全阀：挂载后核对
 cur=$(ls "$SYS" 2>/dev/null | wc -l | tr -d ' ')

@@ -427,7 +427,7 @@ case "$_root" in
   *) bad "6081 根入口不是隐私页（/ 没返回跳转）" ;;
 esac
 case "$_pg" in
-  *20261201*) ok "privacy-page 构建号 20261201（可自证是新版）" ;;
+  *20261202*) ok "privacy-page 构建号 20261202（可自证是新版）" ;;
   *) bad "privacy-page 缺新构建号（无法判断浏览器吃的是哪版）" ;;
 esac
 
@@ -576,6 +576,9 @@ if [ -d "$_SYS" ]; then
         *system_security_cacerts_file*) ok "信任库目录 SELinux 标签正确" ;;
         *) bad "信任库目录 SELinux 标签异常：$_lbl" ;;
     esac
+    _pbad=$(ls -Z "$_SYS" 2>/dev/null | awk '$1 ~ /^u:object_r:/ && $1 !~ /system_security_cacerts_file/ {c++} END{print c+0}')
+    [ "${_pbad:-0}" -eq 0 ] && ok "信任库文件标签全部正确" \
+                            || bad "信任库有 ${_pbad:-0} 个文件标签不对（App 会读不到 CA、HTTPS 弹警告）"
     _cnt=$(su 2000 -c "ls $_SYS 2>/dev/null | wc -l" 2>/dev/null | tr -d ' ')
     [ "${_cnt:-0}" -ge 100 ] && ok "非 root uid 可列举 $_cnt 张 CA" \
                              || bad "非 root uid 只能列举 ${_cnt:-0} 张 CA（信任库对 App 不可见）"
