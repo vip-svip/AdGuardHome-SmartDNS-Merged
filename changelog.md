@@ -1,3 +1,9 @@
+## 20261204
+- **40251 侧栏「证书」项彻底移除**：`高级设置` 分组现在是 `隐私 / 脚本` 两项。做法是把菜单数组里那一项替换成 `...[],`（数组 spread 空占位，等长替换，27,132,064B 不变）。踩过的坑写进工具里：**用 `/*...*/` 注释虽然语法合法，但会让整个分组变成点不开**（实测点击只高亮、箭头不翻转、子项永不出现），所以 `tools/patch_frontend.py` 固定用 spread，不用注释
+- **开关圆点过渡置 none**：`.XkM1AwvjnBB5yZeXXHn1:before` 的 `transition: transform var(--t2), background-color var(--t2)` 改成 `transition:none`（4 份 CSS 副本全部改）。首帧不管 `checked` 是何时落到 DOM 上，圆点都直接停在终点，不会再「先关再滑到开」
+- **首帧默认值**：延续 20261130 的全 `!0`（与 privacy.conf 实际值一致），首帧绘制的就是最终值；加上这次去掉位移动画，刷新时开关区一个像素都不变
+- `tools/patch_frontend.py` 同步：两处新替换（菜单 spread、圆点 transition）都已内置，`--write` 可复现；工具对已 patch 的二进制是幂等的
+
 ## 20261203
 - **证书子系统整体移除**（按使用方要求）：模块不再生成、安装、覆盖任何自签 CA。删掉 `certs/`（两套 CA + 私钥 + meta + cacerts overlay 源）、`scripts/certs_install.sh`、`cgi-bin/certs` 证书页接口、`bin/aghmitm`（15.9MB）与 `scripts/rewrite/`（MITM 重写规则），安装脚本里那段 `unzip certs/*` + `MODDIR=... certs_install.sh` 也一并去掉
 - **MITM 链路一并拆除**：`iptables.sh` 去掉 `mitm_uids` / `mitm_selfheal` / `mitm_redirect_apply` / `mitm_proc_guard` 四个函数与全部调用点，不再给任何 uid 的 443 做 REDIRECT 到 8899、不再给 v6 443 发 tcp-reset；开机 `service.sh` 不再拉起 aghmitm、不再释放 rewrite 默认脚本；`cgi-bin/mitm` 运行时接口删除

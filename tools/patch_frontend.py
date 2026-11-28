@@ -61,6 +61,29 @@ def main(path: str, write: bool) -> int:
     print('bytes before/after:', len(data), len(changed))
     assert len(data) == len(changed)
 
+    # 3) 侧栏「高级设置」里的「证书」项：用数组 spread 空占位删掉（等长）。
+    #    注意不能用 /*...*/ 注释——实测会把整个分组变成不可展开（items 失效）。
+    menu_old = '{label:"证书",path:$t.Certificates,routePath:"Certificates"},'.encode()
+    mi = changed.find(menu_old)
+    print('menu cert item offset:', mi)
+    if mi >= 0:
+        menu_new = b'...[],' + b' ' * (len(menu_old) - 6)
+        assert len(menu_new) == len(menu_old)
+        changed = changed[:mi] + menu_new + changed[mi + len(menu_old):]
+
+    # 4) 开关圆点 transition 置 none：首帧不再从「关的位置」滑到「开的位置」
+    css_old = (b'background-color: var(--fills-switch-knob);\n'
+               b'        transition:\n'
+               b'            transform var(--t2),\n'
+               b'            background-color var(--t2);')
+    css_head = b'background-color: var(--fills-switch-knob);\n        transition:none;'
+    css_new = css_head + b' ' * (len(css_old) - len(css_head))
+    n_css = changed.count(css_old)
+    print('switch-knob transition occurrences:', n_css)
+    changed = changed.replace(css_old, css_new)
+
+    assert len(data) == len(changed)
+    print('bytes before/after:', len(data), len(changed))
     open(path, 'wb').write(changed)
     print('written')
     return 0
