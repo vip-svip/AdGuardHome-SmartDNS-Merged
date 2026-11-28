@@ -1,13 +1,15 @@
 ## 20261210
-- **6081 合并进 6080：页面入口只剩一个**
-  - SmartDNS 内置 UI（6080）本身没有 CGI 能力，只能吃静态文件。开机时把 `webui/upstream-manage.html` 同步到 `smartdns/usr/share/smartdns/wwwroot/`，浏览器直接开 `6080/upstream-manage.html` 就能管理上游；增删改继续走 6081 的 CGI，6081 只当后端，不再对外挂页面
-  - 6081 根路径仍是上游页（`index.html` 与 `upstream-manage.html` 同一份），不出现 404
-- **删掉自建隐私页（两套同名页的根因）**
-  - 设备侧的 AGH 是 `v0.107.60-fork`，隐私防护页内置于固件：`高级设置 → 隐私`，圆点胶囊、三项（防 DNS / VPN / IP 泄露）
-  - 自建 `webui/privacy.html` 是第二套（8 项、`已开启` 胶囊标签），同名同标题，两套并存看起来就是「两个界面」。已整体移除，同时移除 `cgi-bin/privacy-page` 渲染器（页面不再跳它，全仓无引用）
-  - 规则层与状态接口 `cgi-bin/privacy` 保留，AGH 内置页照常读写
-- **`privacy.conf` 默认键清理**：去掉早已删除的 `sb=0` / `par=0`（恶意网站拦截、成人内容过滤），只留实际生效的 8 项
-- **回滚**：`/data/local/tmp/privacy_html_bak_*/privacy.html`、`/data/local/tmp/oppo_bak_*/`，需要时可原样拷回
+- **6081 并入 6080**：`smartdns/usr/share/smartdns/wwwroot/` 里放一份上游服务器管理页，6080 直接可开；`service.sh` 加 `sync_sd_wwwroot()`（在 `start_webui` 之后调用，`cmp -s` 有差异才拷、顺手 `rm -f` 旧的自建 `privacy.html`）
+- **删掉自建隐私页**：`scripts/webui/privacy.html` 与 `scripts/webui/cgi-bin/privacy-page` 整份删除。AGH 面板 40251 → 高级设置 → 隐私 就是唯一入口，不再有同名的第二套页面
+- **隐私页再打一轮二进制补丁**（`bin/AdGuardHome`，27,132,064B 等长替换，ELF 结构不动）：
+  - 顶部提示句去掉「恶意网站拦截」「成人内容过滤」两个名字
+  - 「一键过检测」标题清空
+  - 上游不可达时的提示文案清空
+  - 初始 state 与同步赋值里的 `sb` / `par` 去掉
+  - 校验：`恶意网站拦截`=0、`成人内容过滤`=0、`一键过检测`=0
+- **侧栏只剩「隐私」**：高级设置下的「证书」「脚本」两项此前已置空，这版确认渲染为空
+- **开关不再翻**：`privacy.conf` 8 项全为 1，与首帧默认值一致；`ntp:!1`/`dhcp:!1` 这类旧默认值在二进制里已是 0 次
+- 模块包 `AGH_v20261210.zip`：39,453,832B / 3,245 条目，`bin/AdGuardHome` md5 `c1e0a64b959287f1175efd9ee37c6a90`
 
 ## 20261202
 - **证书警告的第二层根因**：光修目录权限不够。开机早期 `chcon` 会被策略挡下来，注入完成后文件 SELinux 标签停在默认的 `u:object_r:tmpfs:s0`，untrusted_app 读这些文件被拒 —— 系统信任库对 App 仍然是空的。现在统一用 `restorecon -RF`（走 policy 的 file_contexts，比 chcon 稳）收口，做「异常计数 + 最多 3 次重试」，再挂一个 25 秒延迟复核兜底
