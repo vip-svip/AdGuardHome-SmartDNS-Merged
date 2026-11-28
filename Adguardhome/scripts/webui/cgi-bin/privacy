@@ -159,7 +159,9 @@ swap_in() { # $1=iptables 函数名
 
 apply() {
     # 规则集只由这 8 个开关决定；未变且链在挂 → 不重建（POST 幂等零成本）
-    _sig="dns=$DNS vpn=$VPN ip=$IP ntp=$NTP dhcp=$DHCP smb=$SMB tcp=$TCP snmp=$SNMP"
+    # rl=规则集版本号：本脚本升级后规则语义变了，但 8 个开关值可能一个没动。
+    # 只比开关值会让旧链接着旧规则跑下去（升级完看规则还是老的），所以版本必须进 sig。
+    _sig="rl=2 dns=$DNS vpn=$VPN ip=$IP ntp=$NTP dhcp=$DHCP smb=$SMB tcp=$TCP snmp=$SNMP"
     if [ -f "$STAMP" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$_sig" ] \
        && ipt -C OUTPUT -j $CHAIN 2>/dev/null; then
         return 0
@@ -172,9 +174,11 @@ apply() {
     {
         printf '*filter\n:%s - [0:0]\n' "$STAGE"
         P "-A $STAGE -o lo -j RETURN"
+        P "-A $STAGE -i lo -j RETURN"
         P "-A $STAGE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
-        # 防 DNS 泄露（mDNS / SSDP / NetBIOS 探针外发）
-        [ "$DNS" = "1" ] && P "-A $STAGE -p udp -m multiport --dports 5353,1900,137 -j DROP"
+        # 防 DNS 泄露（mDNS / SSDP 探针外发）。137 归 smb 组：否则 smb 关掉后 137 仍被这里挡，
+        # 现场表现为"开关关了没变化"，被当成开关失效。
+        [ "$DNS" = "1" ] && P "-A $STAGE -p udp -m multiport --dports 5353,1900 -j DROP"
         # 防 VPN/IP 泄露（STUN/TURN 协商）
         if [ "$VPN" = "1" ] || [ "$IP" = "1" ]; then
             P "-A $STAGE -p udp -m multiport --dports 3478,3479,5349,5350 -j DROP"
@@ -183,10 +187,13 @@ apply() {
         # Teredo / 6to4 隧道承载（IPv4 承载协议 41）
         [ "$VPN" = "1" ] && P "-A $STAGE -p 41 -j DROP"
         [ "$NTP" = "1" ] && P "-A $STAGE -p udp --dport 123 -j DROP"
-        [ "$DHCP" = "1" ] && P "-A $STAGE -p udp --dport 67 -j DROP"
+        # 只挡"发往别处"的 67 探测，本机 68→67 的续租广播（255.255.255.255）放行，否则会断网
+        [ "$DHCP" = "1" ] && P "-A $STAGE -p udp --dport 67 ! -d 255.255.255.255 -j DROP"
         if [ "$SMB" = "1" ]; then
-            P "-A $STAGE -p udp -m multiport --dports 137,139,445 -j DROP"
-            P "-A $STAGE -p tcp -m multiport --dports 137,139,445 -j DROP"
+            # NBNS(137) NBDGM(138) LLMNR(5355) WS-Discovery(3702)：设备名/机型/共享名的主要广播暴露面
+            P "-A $STAGE -p udp -m multiport --dports 137,138,5355,3702 -j DROP"
+            # SMB over NetBIOS(139) 与 SMB direct(445) 只走 TCP；UDP 445 本来就不存在
+            P "-A $STAGE -p tcp -m multiport --dports 139,445 -j DROP"
         fi
         [ "$TCP" = "1" ] && P "-A $STAGE -p tcp -m multiport --dports 23,25,110,143 -j DROP"
         if [ "$SNMP" = "1" ]; then
@@ -199,18 +206,19 @@ apply() {
     if ! ipt -C $STAGE -o lo -j RETURN 2>/dev/null; then
         ipt -N $STAGE 2>/dev/null
         ipt -A $STAGE -o lo -j RETURN 2>/dev/null
+        ipt -A $STAGE -i lo -j RETURN 2>/dev/null
         ipt -A $STAGE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null
-        [ "$DNS" = "1" ] && ipt -A $STAGE -p udp -m multiport --dports 5353,1900,137 -j DROP 2>/dev/null
+        [ "$DNS" = "1" ] && ipt -A $STAGE -p udp -m multiport --dports 5353,1900 -j DROP 2>/dev/null
         if [ "$VPN" = "1" ] || [ "$IP" = "1" ]; then
             ipt -A $STAGE -p udp -m multiport --dports 3478,3479,5349,5350 -j DROP 2>/dev/null
             ipt -A $STAGE -p tcp -m multiport --dports 3478,3479,5349,5350 -j DROP 2>/dev/null
         fi
         [ "$VPN" = "1" ] && ipt -A $STAGE -p 41 -j DROP 2>/dev/null
         [ "$NTP" = "1" ] && ipt -A $STAGE -p udp --dport 123 -j DROP 2>/dev/null
-        [ "$DHCP" = "1" ] && ipt -A $STAGE -p udp --dport 67 -j DROP 2>/dev/null
+        [ "$DHCP" = "1" ] && ipt -A $STAGE -p udp --dport 67 ! -d 255.255.255.255 -j DROP 2>/dev/null
         if [ "$SMB" = "1" ]; then
-            ipt -A $STAGE -p udp -m multiport --dports 137,139,445 -j DROP 2>/dev/null
-            ipt -A $STAGE -p tcp -m multiport --dports 137,139,445 -j DROP 2>/dev/null
+            ipt -A $STAGE -p udp -m multiport --dports 137,138,5355,3702 -j DROP 2>/dev/null
+            ipt -A $STAGE -p tcp -m multiport --dports 139,445 -j DROP 2>/dev/null
         fi
         [ "$TCP" = "1" ] && ipt -A $STAGE -p tcp -m multiport --dports 23,25,110,143 -j DROP 2>/dev/null
         if [ "$SNMP" = "1" ]; then
@@ -225,18 +233,20 @@ apply() {
     {
         printf '*filter\n:%s - [0:0]\n' "$STAGE"
         P "-A $STAGE -o lo -j RETURN"
+        P "-A $STAGE -i lo -j RETURN"
         P "-A $STAGE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
-        [ "$DNS" = "1" ] && P "-A $STAGE -p udp -m multiport --dports 5353,1900,137 -j DROP"
+        # v6 没有 NetBIOS，137/139/445 在 v6 面是死规则；真正暴露设备名的是 5353/5355/3702/1900
+        [ "$DNS" = "1" ] && P "-A $STAGE -p udp -m multiport --dports 5353,1900 -j DROP"
         if [ "$VPN" = "1" ] || [ "$IP" = "1" ]; then
             P "-A $STAGE -p udp -m multiport --dports 3478,3479,5349,5350 -j DROP"
             P "-A $STAGE -p tcp -m multiport --dports 3478,3479,5349,5350 -j DROP"
         fi
         [ "$VPN" = "1" ] && P "-A $STAGE -p udp --dport 3544 -j DROP"
         [ "$NTP" = "1" ] && P "-A $STAGE -p udp --dport 123 -j DROP"
-        [ "$DHCP" = "1" ] && P "-A $STAGE -p udp --dport 67 -j DROP"
+        # DHCPv6 是 546→547 发往 ff02::1:2；只挡非该组播地址的 547，正常续租不受影响
+        [ "$DHCP" = "1" ] && P "-A $STAGE -p udp --dport 547 ! -d ff02::1:2 -j DROP"
         if [ "$SMB" = "1" ]; then
-            P "-A $STAGE -p udp -m multiport --dports 137,139,445 -j DROP"
-            P "-A $STAGE -p tcp -m multiport --dports 137,139,445 -j DROP"
+            P "-A $STAGE -p udp -m multiport --dports 5355,3702 -j DROP"
         fi
         [ "$TCP" = "1" ] && P "-A $STAGE -p tcp -m multiport --dports 23,25,110,143 -j DROP"
         if [ "$SNMP" = "1" ]; then
@@ -245,11 +255,28 @@ apply() {
         fi
         printf 'COMMIT\n'
     } | ip6tables-restore --noflush -w 2 >/dev/null 2>&1
+    # v6 回退段必须与上面逐条等价：原来这里只补了 lo/ct/dns 三条，restore 一失败 v6 面其余开关全哑
     if ! ipt6 -C $STAGE -o lo -j RETURN 2>/dev/null; then
         ipt6 -N $STAGE 2>/dev/null
         ipt6 -A $STAGE -o lo -j RETURN 2>/dev/null
+        ipt6 -A $STAGE -i lo -j RETURN 2>/dev/null
         ipt6 -A $STAGE -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null
-        [ "$DNS" = "1" ] && ipt6 -A $STAGE -p udp -m multiport --dports 5353,1900,137 -j DROP 2>/dev/null
+        [ "$DNS" = "1" ] && ipt6 -A $STAGE -p udp -m multiport --dports 5353,1900 -j DROP 2>/dev/null
+        if [ "$VPN" = "1" ] || [ "$IP" = "1" ]; then
+            ipt6 -A $STAGE -p udp -m multiport --dports 3478,3479,5349,5350 -j DROP 2>/dev/null
+            ipt6 -A $STAGE -p tcp -m multiport --dports 3478,3479,5349,5350 -j DROP 2>/dev/null
+        fi
+        [ "$VPN" = "1" ] && ipt6 -A $STAGE -p udp --dport 3544 -j DROP 2>/dev/null
+        [ "$NTP" = "1" ] && ipt6 -A $STAGE -p udp --dport 123 -j DROP 2>/dev/null
+        [ "$DHCP" = "1" ] && ipt6 -A $STAGE -p udp --dport 547 ! -d ff02::1:2 -j DROP 2>/dev/null
+        if [ "$SMB" = "1" ]; then
+            ipt6 -A $STAGE -p udp -m multiport --dports 5355,3702 -j DROP 2>/dev/null
+        fi
+        [ "$TCP" = "1" ] && ipt6 -A $STAGE -p tcp -m multiport --dports 23,25,110,143 -j DROP 2>/dev/null
+        if [ "$SNMP" = "1" ]; then
+            ipt6 -A $STAGE -p udp -m multiport --dports 161,162 -j DROP 2>/dev/null
+            ipt6 -A $STAGE -p tcp -m multiport --dports 161,162 -j DROP 2>/dev/null
+        fi
     fi
     swap_in ipt6
 
