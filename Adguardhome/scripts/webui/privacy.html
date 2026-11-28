@@ -73,12 +73,12 @@ window.__AGH_PRIV={"dns":1,"vpn":1,"ip":1,"ntp":1,"dhcp":1,"smb":1,"tcp":1,"snmp
 <script>
 var KEYS = ['dns','vpn','ip','ntp','dhcp','smb','tcp','snmp'];
 var ITEMS = [
-  {k:'dns', t:'防止 DNS 泄露', d:'丢弃 mDNS / SSDP 探针（UDP 5353/1900），全部解析强制走 AGH 加密上游，检测网站看不到运营商 DNS。'},
+  {k:'dns', t:'防止 DNS 泄露', d:'丢弃 mDNS / SSDP / NetBIOS 探针，全部解析强制走 AGH 加密上游，检测网站看不到运营商 DNS。'},
   {k:'vpn', t:'防止 VPN 泄露', d:'阻断 STUN / TURN 与 Teredo 隧道协商，WebRTC 暴露不出真实出口；VPN 断开也不回落到本地网络。'},
   {k:'ip',  t:'防止 IP 泄露', d:'屏蔽 WebRTC ICE 收集所需的 STUN 端口，网站拿不到局域网 IP 与公网映射地址。'},
   {k:'ntp', t:'防止 NTP 时钟泄露', d:'丢弃出网 NTP 对时请求（UDP 123）。时钟指纹可跨网络关联同一设备；本机时间由系统维护不受影响。'},
-  {k:'dhcp',t:'防止 DHCP 探测泄露', d:'丢弃发往外部 DHCP 服务端的探测（UDP 67，本机续租广播放行）。防恶意热点通过 DHCP 指纹识别设备型号与系统。'},
-  {k:'smb', t:'防止局域网探测泄露', d:'丢弃 NetBIOS / SMB / LLMNR / WSD 出网流量（UDP 137/138/5355/3702、TCP 139/445）。防内网扫描器读取设备名与共享类型。'},
+  {k:'dhcp',t:'防止 DHCP 探测泄露', d:'丢弃出网 DHCP 广播（UDP 67）。防恶意热点通过 DHCP 指纹识别设备型号与系统。'},
+  {k:'smb', t:'防止局域网探测泄露', d:'丢弃 NetBIOS / SMB 出网流量（137/139/445）。防内网扫描器读取设备名与共享目录。'},
   {k:'tcp', t:'防止明文协议泄露', d:'丢弃 Telnet / SMTP / POP3 / IMAP 明文端口出网（23/25/110/143）。防 App 明文回传数据。'},
   {k:'snmp',t:'防止 SNMP 信息泄露', d:'丢弃 SNMP 查询与陷阱（161/162）。防设备信息（系统版本、接口列表）被读取。'}
 ];
