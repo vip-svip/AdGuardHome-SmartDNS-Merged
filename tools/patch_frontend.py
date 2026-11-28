@@ -54,12 +54,13 @@ def main(path: str, write: bool) -> int:
     print('defaults left after patch:', n2)
 
     i = changed.find(SB_START)
-    j = changed.find(PAR_END, i)
-    seg_len = j + len(PAR_END) - i
-    filler = b'/*' + b' ' * (seg_len - 4) + b'*/'
-    changed = changed[:i] + filler + changed[j + len(PAR_END):]
-    print('bytes before/after:', len(data), len(changed))
-    assert len(data) == len(changed)
+    j = changed.find(PAR_END, i) if i >= 0 else -1
+    if i >= 0 and j > i:
+        seg_len = j + len(PAR_END) - i
+        filler = b'/*' + b' ' * (seg_len - 4) + b'*/'
+        changed = changed[:i] + filler + changed[j + len(PAR_END):]
+        print('bytes before/after:', len(data), len(changed))
+        assert len(data) == len(changed)
 
     # 3) 侧栏「高级设置」里的「证书」项：用数组 spread 空占位删掉（等长）。
     #    注意不能用 /*...*/ 注释——实测会把整个分组变成不可展开（items 失效）。
@@ -100,6 +101,25 @@ def main(path: str, write: bool) -> int:
     n_html = changed.count(html_old)
     print('html tap-highlight rules:', n_html)
     changed = changed.replace(html_old, html_new)
+
+    # 7) 隐私页首帧：异步 fetch → 同步 XHR。
+    #    fetch 的回调必然排在首帧绘制之后，于是「默认值先画一遍 → 真值回来再改」，
+    #    用户看到的就是「开关自己翻一次」（关过的开关先绿后灰）。
+    #    实测对照（conf 里 smb=0，竖屏 30fps 逐帧统计开关区绿色像素）：
+    #      v7(异步)：第 110 帧页面出现时 smb 区绿=1004，第 127 帧降到 0 —— 翻了一次；
+    #      v8(同步)：全程 230 帧 smb 区绿=0，页面首帧就是最终值。
+    s0 = changed.find(b'A(()=>{fetch(`')
+    if s0 >= 0:
+        tail = b'))}),n=Vy()'
+        rel = changed[s0:s0 + 240].find(tail)
+        old_seg = changed[s0:s0 + rel + 4]
+        q = b'"'
+        nb = (b'A(()=>{try{var X=new XMLHttpRequest;X.open(' + q + b'GET' + q
+              + b',Hy,0);X.send();r(JSON.parse(X.responseText)),a(' + q + q
+              + b')}catch(_){a(' + q + '读取状态失败'.encode() + q + b')}})')
+        assert len(nb) <= len(old_seg)
+        changed = changed[:s0] + nb + b' ' * (len(old_seg) - len(nb)) + changed[s0 + len(old_seg):]
+        print('privacy fetch -> sync XHR at', s0, 'seg', len(old_seg), '->', len(nb))
 
     assert len(data) == len(changed)
     print('bytes before/after:', len(data), len(changed))
