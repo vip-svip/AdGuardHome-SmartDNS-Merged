@@ -1,6 +1,6 @@
 {
-  "version": "20261210",
-  "versionCode": 20261210,
-  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261210/AdGuardHome-SmartDNS-Merged-20261210.zip",
-  "changelog": "[20261210] 6081 页面并入 6080；删除自建 privacy.html 与 cgi-bin/privacy-page；隐私页删掉「恶意网站拦截」「成人内容过滤」两个开关与「一键过检测」块，8 个开关首帧默认值全为真、刷新不再翻；侧栏高级设置下只剩「隐私」"
+  "version": "20261211",
+  "versionCode": 2026121101,
+  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261211/AdGuardHome-SmartDNS-Merged-20261211.zip",
+  "changelog": "[20261211] 隐私页开关彻底修好：cgi 换成三层保护版（原子写 + 8 键白名单 + 变化计数 + 500ms 时间锁），整表回写全量拒绝，刷新页面 conf 零回写、开关不翻；service.sh 自愈循环改成白名单 apps/upstream/privacy，开机不再重建证书/脚本/MITM 三套页；移除 certs/ 整套证书、certs_install.sh、privacy.rewrite、cgi-bin/{certs,mitm,scripts}；侧栏只剩「隐私」；恶意网站拦截/成人内容过滤/一键过检测 词频全 0"
 }

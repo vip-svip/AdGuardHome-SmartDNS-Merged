@@ -1,3 +1,16 @@
+## 20261211
+- **隐私开关"关一下再打开"彻底解决（服务端）**：`cgi-bin/privacy` 换成三层保护版
+  - `save_conf()` 原子写（`.tmp` → `chmod 644` → `mv -f`），不再出现半截文件
+  - POST 解析改成 8 键白名单 awk（dns/vpn/ip/ntp/dhcp/smb/tcp/snmp），`sb`/`par` 彻底丢弃
+  - 变化计数：单次 POST 改动 ≥2 键且无 `force=1` → 判定前端整表回写，全量恢复原值
+  - 时间锁：`/proc/uptime` 百分秒精度，500ms 内重复 POST 丢弃；状态存 `/data/adb/agh/.privacy_post_ts`
+  - 每次 POST 落一行诊断日志 `/data/adb/agh/privacy_post.log`（body / nchg / 最终值）
+- **实测**：连续打开隐私页 5 次，`privacy.conf` 内容零变化、mtime 冻结、POST 日志为空；单点开关只改 1 键（nchg=1），精确落盘
+- **`service.sh` 自愈循环改白名单**：只补 `apps` / `upstream` / `privacy`，其它键 `chattr -i` 后 `rm -f`；开机预热只留 `apps?rebuild=1`，删掉 `privacy?sync=1` 与 `certs/mitm/scripts?rebuild=1`
+- **删掉证书 / 脚本 / MITM 三套页**：`cgi-bin/certs`、`cgi-bin/mitm`、`cgi-bin/scripts` 移出包；`certs/` 整套 CA 证书、`scripts/certs_install.sh`、`scripts/rewrite/privacy.rewrite` 一并移除（自签 CA 不再被塞进系统信任区，浏览器不再弹证书警告）
+- 侧栏「高级设置」下只剩「隐私」；`恶意网站拦截` / `成人内容过滤` / `一键过检测` 在 `bin/AdGuardHome` 里词频全 0
+- `bin/AdGuardHome` md5 `c1e0a64b959287f1175efd9ee37c6a90`（27,132,064B），git blob `43f1713b0e325c010aff87b1bbd39778a4f92b34`
+
 ## 20261210
 - **6081 并入 6080**：`smartdns/usr/share/smartdns/wwwroot/` 里放一份上游服务器管理页，6080 直接可开；`service.sh` 加 `sync_sd_wwwroot()`（在 `start_webui` 之后调用，`cmp -s` 有差异才拷、顺手 `rm -f` 旧的自建 `privacy.html`）
 - **删掉自建隐私页**：`scripts/webui/privacy.html` 与 `scripts/webui/cgi-bin/privacy-page` 整份删除。AGH 面板 40251 → 高级设置 → 隐私 就是唯一入口，不再有同名的第二套页面

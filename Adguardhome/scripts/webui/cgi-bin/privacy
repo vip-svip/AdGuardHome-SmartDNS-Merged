@@ -52,8 +52,14 @@ load_conf() {
 }
 
 save_conf() {
+    # 原子写：先落 .tmp 再 mv，避免半个文件被前端读到（读到半个就是"先关后开"的视觉跳）
+    _tmp="$CONF.tmp.$$"
     printf 'dns=%s\nvpn=%s\nip=%s\nntp=%s\ndhcp=%s\nsmb=%s\ntcp=%s\nsnmp=%s\n' \
-        "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP" > "$CONF" 2>/dev/null
+        "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP" > "$_tmp" 2>/dev/null \
+        && chmod 644 "$_tmp" 2>/dev/null \
+        && mv -f "$_tmp" "$CONF" 2>/dev/null \
+        || rm -f "$_tmp" 2>/dev/null
+    return 0
 }
 
 # 静态页面里的首屏真值行（cgi 在同目录的上一级）
@@ -268,19 +274,74 @@ case "$REQUEST_METHOD" in
             body=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
         fi
         load_conf
-        # 一次 tr/sed 全部取值（旧版 10 条管道）
+        # ---- 目标状态触发 + 防抖 + 拒绝隐式回写（v20261211） ----
+        # 记下解析前的值，用来数「这次到底想改哪几个键」
+        _od=$DNS; _ov=$VPN; _oi=$IP; _on=$NTP; _oh=$DHCP
+        _os=$SMB; _ot=$TCP; _onm=$SNMP
+
+        # force：只有显式带 force=1 才允许一次改动多个键（脚本/手动维护用）
+        _force=0
+        case "$QUERY_STRING" in *force=1*) _force=1 ;; esac
+        case "$body" in *force=1*) _force=1 ;; esac
+
+        # 白名单 8 键：sb / par / 大小写变体 / 其它历史键一律丢弃，绝不进 eval
         _pv=$(printf '%s' "$body" | tr '&' '\n' | awk -F= '
-            { k=$1; v=$2; if (v=="0"||v=="1") printf "%s=%s\n", toupper(k), v }')
+            BEGIN { ok["dns"]=1;ok["vpn"]=1;ok["ip"]=1;ok["ntp"]=1;
+                    ok["dhcp"]=1;ok["smb"]=1;ok["tcp"]=1;ok["snmp"]=1 }
+            {
+                k=tolower($1); gsub(/[ \t\r]/,"",k);
+                v=$2; gsub(/[ \t\r]/,"",v); sub(/[#;].*/,"",v);
+                if ((k in ok) && (v=="0" || v=="1")) printf "%s=%s\n", toupper(k), v
+            }')
         eval "$_pv" 2>/dev/null
-        case "$DNS" in 0|1) ;; *) DNS=1 ;; esac
-        case "$VPN" in 0|1) ;; *) VPN=1 ;; esac
-        case "$IP"  in 0|1) ;; *) IP=1  ;; esac
-        case "$NTP" in 0|1) ;; *) NTP=1 ;; esac
+        case "$DNS"  in 0|1) ;; *) DNS=1  ;; esac
+        case "$VPN"  in 0|1) ;; *) VPN=1  ;; esac
+        case "$IP"   in 0|1) ;; *) IP=1   ;; esac
+        case "$NTP"  in 0|1) ;; *) NTP=1  ;; esac
         case "$DHCP" in 0|1) ;; *) DHCP=1 ;; esac
-        case "$SMB" in 0|1) ;; *) SMB=1 ;; esac
-        case "$TCP" in 0|1) ;; *) TCP=1 ;; esac
+        case "$SMB"  in 0|1) ;; *) SMB=1  ;; esac
+        case "$TCP"  in 0|1) ;; *) TCP=1  ;; esac
         case "$SNMP" in 0|1) ;; *) SNMP=1 ;; esac
-        save_conf
+
+        # 数一下有几个键被改了
+        _nchg=0
+        [ "$DNS"  != "$_od"  ] && _nchg=$((_nchg+1))
+        [ "$VPN"  != "$_ov"  ] && _nchg=$((_nchg+1))
+        [ "$IP"   != "$_oi"  ] && _nchg=$((_nchg+1))
+        [ "$NTP"  != "$_on"  ] && _nchg=$((_nchg+1))
+        [ "$DHCP" != "$_oh"  ] && _nchg=$((_nchg+1))
+        [ "$SMB"  != "$_os"  ] && _nchg=$((_nchg+1))
+        [ "$TCP"  != "$_ot"  ] && _nchg=$((_nchg+1))
+        [ "$SNMP" != "$_onm" ] && _nchg=$((_nchg+1))
+
+        # 一次改 2 个以上 = 前端整表回写，不是用户点单个开关 → 原样退回
+        if [ "$_force" = "0" ] && [ "$_nchg" -ge 2 ]; then
+            DNS=$_od; VPN=$_ov; IP=$_oi; NTP=$_on; DHCP=$_oh
+            SMB=$_os; TCP=$_ot; SNMP=$_onm
+            _nchg=0
+        fi
+
+        # 时间锁：距上次真实写入 <200ms，这次又想写 → 认作抖动，丢弃
+        # 用 /proc/uptime 的百分秒精度，秒级 date 拦不住 80~300ms 的来回跳
+        _ts=/data/adb/agh/.privacy_post_ts
+        _now=$(awk '{printf "%d", $1*100}' /proc/uptime 2>/dev/null)
+        [ -n "$_now" ] || _now=$(( $(date +%s) * 100 ))
+        _last=$(cat "$_ts" 2>/dev/null | tr -d ' \n\r')
+        case "$_last" in ''|*[!0-9]*) _last=0 ;; esac
+        _gap=$((_now - _last))
+        [ "$_gap" -lt 0 ] && _gap=999999   # 老格式（秒级）残留或时钟跳变，当作"很久以前"，不锁
+        # 时间锁 500ms：前端一次点击带出的"写→回填→再写"通常在 100~300ms 内完成，
+        # 真手点第二次至少隔半秒，500ms 既能拦住回写抖动又不会误伤手动切换
+        if [ "$_nchg" -ge 1 ] && [ "$_force" = "0" ] && [ "$_gap" -lt 50 ]; then
+            load_conf
+            _nchg=0
+        fi
+
+        # 诊断日志：把每次 POST 的原始 body 和最终落盘值都记下来（排查"跳一下"用）
+        echo "$(date +%T) body=[$body] nchg=$_nchg force=$_force -> dns=$DNS vpn=$VPN ip=$IP ntp=$NTP dhcp=$DHCP smb=$SMB tcp=$TCP snmp=$SNMP" \
+            >> /data/adb/agh/privacy_post.log 2>/dev/null
+
+        [ "$_nchg" -ge 1 ] && { save_conf; echo "$_now" > "$_ts" 2>/dev/null; }
         apply
         state_write
         cors

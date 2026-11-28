@@ -676,17 +676,30 @@ find_busybox() {
 start_webui() {
     [ -d "$WEBUI_DIR/cgi-bin" ] || return 0
     # 自愈：模块目录里有、运行目录里没有的 CGI 补过来，并统一给执行权限。
-    # 历史 bug：升级 / 旧安装只带了 upstream，certs/scripts/mitm/apps 缺失，
-    # 前端请求直接 404（表现为「证书界面读取证书失败」「脚本页空列表」）。
+    # 白名单只有 apps / upstream / privacy 三个：
+    #   apps      —— 应用分流列表
+    #   upstream  —— 上游服务器管理（6080/6081 同一个页面）
+    #   privacy   —— 隐私开关的 --apply 执行体（页面本体在 AGH 二进制里，不靠它渲染）
+    # certs / mitm / scripts 三套已整体下线，模块目录里若还有残留，这里直接删掉，
+    # 否则「开机自愈」会把它又补回运行目录，表现为删了又回来。
     _modcgi="$ADGPATH/scripts/webui/cgi-bin"
     if [ -d "$_modcgi" ]; then
         for _c in "$_modcgi"/*; do
             [ -f "$_c" ] || continue
             _n=${_c##*/}
-            if [ ! -f "$WEBUI_DIR/cgi-bin/$_n" ]; then
-                cp -f "$_c" "$WEBUI_DIR/cgi-bin/$_n" 2>/dev/null
-                log "webui: 补装缺失 CGI $_n"
-            fi
+            case "$_n" in
+                apps|upstream|privacy)
+                    if [ ! -f "$WEBUI_DIR/cgi-bin/$_n" ]; then
+                        cp -f "$_c" "$WEBUI_DIR/cgi-bin/$_n" 2>/dev/null
+                        log "webui: 补装缺失 CGI $_n"
+                    fi
+                    ;;
+                *)
+                    rm -f "$_c" 2>/dev/null
+                    chattr -i "$WEBUI_DIR/cgi-bin/$_n" 2>/dev/null
+                    rm -f "$WEBUI_DIR/cgi-bin/$_n" 2>/dev/null
+                    ;;
+            esac
         done
     fi
     chmod 755 "$WEBUI_DIR/cgi-bin"/* 2>/dev/null
@@ -717,15 +730,13 @@ sync_sd_wwwroot() {
 }
 sync_sd_wwwroot
 
-# 6081 管理面缓存预热：scripts/apps/certs/mitm 的列表响应冷算要 0.3~1.6s，
-# 首访时前端会先渲染空态再填充（看起来像「刷新后先是空的」）。
-# 这里开机后台各打一次强制重建，页面首访就是直接命中缓存。
+# 6081 管理面缓存预热：apps 列表响应冷算要 0.3~1.6s，首访时前端会先渲染空态
+# 再填充（看起来像「刷新后先是空的」）。这里开机后台打一次强制重建，首访直接命中缓存。
+# privacy 的 sync 与 certs/mitm/scripts 的 rebuild 已随三套页面一并去掉：
+# 那些端点会去建证书目录、扫脚本库，属于已下线功能的副作用。
 (
     sleep 3
-    curl -s -m 10 -o /dev/null "http://127.0.0.1:6081/cgi-bin/privacy?sync=1" 2>/dev/null
-    for _c in scripts apps certs mitm; do
-        curl -s -m 15 -o /dev/null "http://127.0.0.1:6081/cgi-bin/$_c?rebuild=1" 2>/dev/null
-    done
+    curl -s -m 15 -o /dev/null "http://127.0.0.1:6081/cgi-bin/apps?rebuild=1" 2>/dev/null
 ) >/dev/null 2>&1 &
 
 # ---------------------------------------------------------------
@@ -1052,7 +1063,7 @@ ensure_querylog_off() {
 ensure_querylog_off
 
 # 应用隐私防护规则（防 DNS/VPN/IP 泄露，配置在 /data/adb/agh/privacy.conf）
-# 系统级 CA 幂等安装（HTTP S / MITM），保证 overlay 每次开机都在位
+# 系统级 CA / MITM 已整体下线，不再往系统证书库塞自签 CA（那是浏览器弹证书警告的来源）
 # ---- 内置默认脚本：缺失即释放 ----
 # 目的：脚本页首次打开就有可用条目，而不是空表；用户可停用/删除，不会反复覆盖。
 _REWRITE_DIR="$AGH_DIR/scripts/rewrite"
@@ -1069,8 +1080,8 @@ if [ ! -f "$_REWRITE_DIR/privacy.rewrite" ]; then
         [ -f "$_src" ] && { cp -f "$_src" "$_REWRITE_DIR/privacy.rewrite" 2>/dev/null; break; }
     done
 fi
-_certs_sh="$SCRIPT_DIR/certs_install.sh"
-[ -f "$_certs_sh" ] && sh "$_certs_sh" >/dev/null 2>&1 &
+# 自签 CA 安装已下线：不再调用 certs_install.sh，系统证书库保持原样。
+# 需要 HTTPS 解密的场合请自行手动装，模块启动流程不再碰证书。
 # 改写脚本运行时：aghmitm（用模块内置 MITM CA 做 TLS 解密 + URL 重写）
 # 建 /data/adb/agh/mitm_on 后开机自启，监听 127.0.0.1:8899
 if [ -f "$AGH_DIR/mitm_on" ] && [ -x "$BIN_DIR/aghmitm" ]; then
