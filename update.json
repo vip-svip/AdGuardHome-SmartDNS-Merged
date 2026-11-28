@@ -1,6 +1,6 @@
 {
-  "version": "20261211",
-  "versionCode": 2026121101,
-  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261211/AdGuardHome-SmartDNS-Merged-20261211.zip",
-  "changelog": "[20261211] 隐私页开关彻底修好：cgi 换成三层保护版（原子写 + 8 键白名单 + 变化计数 + 500ms 时间锁），整表回写全量拒绝，刷新页面 conf 零回写、开关不翻；service.sh 自愈循环改成白名单 apps/upstream/privacy，开机不再重建证书/脚本/MITM 三套页；移除 certs/ 整套证书、certs_install.sh、privacy.rewrite、cgi-bin/{certs,mitm,scripts}；侧栏只剩「隐私」；恶意网站拦截/成人内容过滤/一键过检测 词频全 0"
+  "version": "20261212",
+  "versionCode": 2026121201,
+  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261212/AdGuardHome-SmartDNS-Merged-20261212.zip",
+  "changelog": "[20261212] 隐私页开关彻底修好（真因定位）：二进制内嵌前端原来用「初始 state 全 !0 + 挂载后异步 GET 覆盖」，只要 conf 里有 0 的项，每次打开都是「先绿后灰」——这才是「关一下再打开」。本轮把内嵌 JS 改成同步预取：新增 Qy() 同步 XHR 读 6081 拿真值，const[e,t]=_({dns:!0,...}) 改为 _(Qy())，首帧即最终值，零翻转；等长补丁 27,132,064B 不变。配套：cgi 三层保护（原子写/8 键白名单/变化计数/500ms 锁）、service.sh 自愈白名单、移除 certs/scripts/MITM"
 }
