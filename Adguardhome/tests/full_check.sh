@@ -303,10 +303,10 @@ printf '%s\n' "$REG" | _gr -q '脚本拦截.txt' && ok "脚本拦截.txt 已注�
 EN=$(printf '%s' "$FS" | _gr -o '"enabled":false' | wc -l | tr -d ' ')
 [ "${EN:-0}" = "0" ] && ok "没有默认关闭的过滤器" || note "有 $EN 个过滤器被关掉"
 
-hdr "8. 证书链"
+hdr "8. 证书链（已移除，做反向校验）"
 for n in https mitm; do
     C="$MODDIR/certs/$n-ca.crt"
-    [ -s "$C" ] && ok "$n CA 在模块目录（$(wc -c < "$C" | tr -d ' ')B）" || bad "$n CA 缺失：$C"
+    [ -e "$C" ] && bad "$n CA 仍在模块目录（证书子系统没删干净）" || ok "$n CA 已不存在"
 done
 # 2026-11-28：信任库/证书检查已随证书子系统一起移除。系统 CA 应为原厂快照，
 # 这里只确认模块没有往信任库塞东西。
@@ -342,8 +342,7 @@ for s in vpn_dns_sync.sh iptables.sh; do
 done
 
 hdr "10. 日志与轮转"
-SZ=$(wc -c < "$AGH_DIR/mitm.log" 2>/dev/null | tr -d ' ')
-if [ "${SZ:-0}" -le 2097152 ]; then ok "mitm.log $(( ${SZ:-0} / 1024 ))KB（阈值 2MB 内）"; else bad "mitm.log ${SZ}B 超过 2MB，没轮转"; fi
+[ -e "$AGH_DIR/mitm.log" ] && bad "mitm.log 仍在写（MITM 已移除）" || ok "mitm.log 已不存在"
 CS=$(wc -c < "$AGH_DIR/bin/crash.log" 2>/dev/null | tr -d ' ')
 [ "${CS:-0}" -le 2097152 ] && ok "bin/crash.log（AGH 自身日志）$(( ${CS:-0} / 1024 ))KB（轮转生效）" || bad "bin/crash.log ${CS}B 超过 2MB（轮转没生效）"
 for l in agh.log dnsenc.log sni_err.log; do
@@ -486,21 +485,9 @@ _nrr=$(iptables -w 2 -S AGH_PRIV 2>/dev/null | _gr -c -- '--dport 123')
 [ "${_nrr:-0}" = "$_back" ] && ok "POST ntp=$_back 复原：123 端口 DROP 回到 ${_nrr} 条" \
     || bad "复原失败（123 端口 DROP ${_nrr} 条，应 ${_back}）"
 
-# 12.4 aghmitm 自愈：kill -9 后必须有人拉起（真机实测旧版 31 秒都没人管）
-if [ -f "$AGH_DIR/mitm_on" ]; then
-    sleep 3
-    _om=$(pidof aghmitm)
-    kill -9 "$_om" 2>/dev/null
-    _i=0
-    while [ "$_i" -lt 35 ]; do
-        _nm=$(pidof aghmitm)
-        [ -n "$_nm" ] && break
-        _i=$((_i + 1)); sleep 1
-    done
-    [ -n "$_nm" ] && ok "aghmitm 被杀后 ${_i}s 内自愈（新 pid $_nm）" || bad "aghmitm 被杀后 35s 内没人拉起（SNI 消费者消失）"
-else
-    note "mitm_on 不在，跳过 aghmitm 自愈"
-fi
+# 12.4 MITM 已移除：确认没人偷偷把它拉回来
+[ -e "$AGH_DIR/mitm_on" ] && bad "mitm_on 开关文件仍在" || ok "mitm_on 开关文件已不存在"
+[ -e "$AGH_DIR/mitm_uids.txt" ] && bad "mitm_uids.txt 接管名单仍在" || ok "mitm_uids.txt 已不存在"
 
 # 12.5 AGH 自愈
 sleep 3
@@ -527,7 +514,7 @@ fi
 # 12.6 fd 泄漏 / 规则泄漏
 _fd=$(ls /proc/"$(pidof AdGuardHome)"/fd 2>/dev/null | wc -l | tr -d ' ')
 [ "${_fd:-0}" -le 200 ] && ok "AGH fd=${_fd}（≤200）" || bad "AGH fd=${_fd} 偏多（疑似句柄泄漏）"
-# 上面刚 kill 过 aghmitm/AGH，SNI 链可能在重建：先等 10s 让守护收尾，再连采三次
+# 上面刚 kill 过 AGH，SNI 链可能在重建：先等 10s 让守护收尾，再连采三次
 snap() {
     printf '%s/%s/%s' \
         "$(iptables -w 2 -S AGH_SNI 2>/dev/null | wc -l | tr -d ' ')" \
@@ -557,27 +544,18 @@ _n3=$(LC_ALL=C grep -a -c 'key:"sb",title:' "$_BIN" 2>/dev/null)
 _n4=$(LC_ALL=C grep -a -c 'key:"par",title:' "$_BIN" 2>/dev/null)
 [ "${_n4:-0}" -eq 0 ] && ok "内嵌前端：成人内容过滤项已删除" || bad "内嵌前端仍有 par 开关项"
 
-# ============ 14. 系统信任库（MITM CA 必须对所有 App 可见）============
-hdr "14. 系统信任库"
+# ============ 14. 系统信任库（应为原厂快照，模块不得插手）============
+hdr "14. 系统信任库（原厂态校验）"
 _SYS=/system/etc/security/cacerts
 if [ -d "$_SYS" ]; then
-    _mode=$(stat -c %a "$_SYS" 2>/dev/null)
-    [ "$_mode" = "755" ] && ok "信任库目录权限 0755（App 可读）" \
-                         || bad "信任库目录权限 ${_mode}（非 0755，所有 HTTPS 会弹证书错误）"
-    _lbl=$(ls -ldZ "$_SYS" 2>/dev/null | awk '{print $5}')
-    case "$_lbl" in
-        *system_security_cacerts_file*) ok "信任库目录 SELinux 标签正确" ;;
-        *) bad "信任库目录 SELinux 标签异常：$_lbl" ;;
-    esac
-    _pbad=$(ls -Z "$_SYS" 2>/dev/null | awk '$1 ~ /^u:object_r:/ && $1 !~ /system_security_cacerts_file/ {c++} END{print c+0}')
-    [ "${_pbad:-0}" -eq 0 ] && ok "信任库文件标签全部正确" \
-                            || bad "信任库有 ${_pbad:-0} 个文件标签不对（App 会读不到 CA、HTTPS 弹警告）"
-    _cnt=$(su 2000 -c "ls $_SYS 2>/dev/null | wc -l" 2>/dev/null | tr -d ' ')
-    [ "${_cnt:-0}" -ge 100 ] && ok "非 root uid 可列举 $_cnt 张 CA" \
-                             || bad "非 root uid 只能列举 ${_cnt:-0} 张 CA（信任库对 App 不可见）"
+    mount | _gr -q " on $_SYS " && bad "cacerts 被模块 tmpfs 覆盖" || ok "cacerts 未被覆盖（原厂目录）"
     for _h in 2c637461 e2b6a4fd; do
-        [ -f "$_SYS/$_h.0" ] && ok "模块 CA $_h.0 在信任库" || bad "模块 CA $_h.0 不在信任库"
+        [ -f "$_SYS/$_h.0" ] && bad "模块 CA $_h.0 仍在信任库" || ok "模块 CA $_h.0 已不在信任库"
     done
+    _cnt=$(ls "$_SYS" 2>/dev/null | wc -l | tr -d ' ')
+    [ "${_cnt:-0}" -ge 100 ] && ok "原厂 CA ${_cnt} 张在位" || bad "原厂 CA 只剩 ${_cnt} 张（信任库被破坏）"
+    _app=$(su 2000 -c "ls $_SYS 2>/dev/null | wc -l" 2>/dev/null | tr -d ' ')
+    [ "${_app:-0}" -ge 100 ] && ok "非 root uid 可列举 ${_app} 张 CA" || bad "非 root uid 只能列举 ${_app:-0} 张（App 会弹证书错误）"
 else
     bad "系统信任库目录不存在"
 fi

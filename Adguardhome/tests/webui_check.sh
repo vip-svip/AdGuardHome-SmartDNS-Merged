@@ -35,10 +35,10 @@ info "1. 端口与进程"
 netstat -tln 2>/dev/null | grep -q ":$PORT " && ok "httpd 监听 $PORT" || bad "httpd 未监听 $PORT"
 netstat -tlnp 2>/dev/null | grep -q AdGuardHome && ok "AdGuardHome 在跑" || bad "AdGuardHome 不在"
 pidof smartdns >/dev/null 2>&1 && ok "smartdns 在跑" || bad "smartdns 不在"
-pidof aghmitm >/dev/null 2>&1 && ok "aghmitm 在跑" || bad "aghmitm 不在"
+pidof aghmitm >/dev/null 2>&1 && bad "aghmitm 在跑（MITM 已移除）" || ok "aghmitm 未运行"
 
 info "2. 各 CGI 延迟（目标：GET ≤400ms，冷缓存首访）"
-for c in privacy scripts apps certs mitm upstream; do
+for c in privacy scripts apps upstream; do
     _r=$(req "$BASE/$c" "/data/local/tmp/_chk_$c")
     _m=$(ms "$_r")
     if [ "$(code "$_r")" != "200" ]; then bad "$c HTTP $(code "$_r")"; continue; fi
@@ -78,11 +78,11 @@ _sz=$(wc -c < /data/local/tmp/_chk_scripts 2>/dev/null | tr -d ' ')
 grep -q '"scripts"' /data/local/tmp/_chk_scripts 2>/dev/null && ok "scripts 含 scripts 数组" || bad "scripts 缺 scripts 数组"
 grep -q '"apps"' /data/local/tmp/_chk_apps 2>/dev/null && ok "apps 含 apps 数组" || bad "apps 缺 apps 数组"
 
-info "6. 证书"
-grep -q '"https"' /data/local/tmp/_chk_certs 2>/dev/null && grep -q '"mitm"' /data/local/tmp/_chk_certs 2>/dev/null \
-    && ok "certs 含 https/mitm 两张 CA" || bad "certs 缺 CA 条目"
-_r=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/certs?download=mitm" 2>/dev/null)
-[ "$_r" = "200" ] && ok "certs?download=mitm 可下载" || bad "mitm CA 下载失败（$_r）"
+info "6. 证书接口（已移除，应 404）"
+for c in certs mitm; do
+    _r=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/$c" 2>/dev/null)
+    [ "$_r" = "404" ] && ok "cgi-bin/$c 已下线（404）" || bad "cgi-bin/$c 仍在响应 $_r"
+done
 
 info "7. 源码/页面一致性"
 _w=/data/adb/agh/scripts/webui
