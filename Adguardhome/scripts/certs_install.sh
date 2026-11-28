@@ -34,9 +34,21 @@ for f in "$SRC"/*.0; do
     n=$((n + 1))
 done
 chcon -R u:object_r:system_security_cacerts_file:s0 "$DST" 2>/dev/null
+chmod 755 "$DST" 2>/dev/null
 log "[certs] overlay 目录已就绪：$n 张 -> $DST"
 
 # ---------- 通道 2：运行时注入（overlay 未生效时） ----------
+# 【每次开机都必须先做这一步】tmpfs 挂载点每次重建，目录权限必定退回 0700。
+# 0700 下 uid!=0 的进程（所有 App / WebView / Chrome / SDK）打不开这个目录，
+# 系统信任库对它们等于空 —— 表现就是「所有 HTTPS 站点都弹证书不受信任」。
+# 注意：必须放在任何 exit 之前，否则「信任库已含全部 CA」那条提前 return 会跳过它。
+if grep -q " $SYS " /proc/mounts 2>/dev/null; then
+    chmod 755 "$SYS" 2>/dev/null
+    chmod 644 "$SYS"/* 2>/dev/null
+    chcon -R u:object_r:system_security_cacerts_file:s0 "$SYS" 2>/dev/null
+    log "[certs] 信任库目录权限已校验（755 / 644 / 标签）"
+fi
+
 need=0
 for f in "$SRC"/*.0; do
     b=${f##*/}
@@ -50,6 +62,11 @@ fi
 
 # 已有 tmpfs 挂载 → 直接核对清单
 if mountpoint -q "$SYS" 2>/dev/null || grep -q " $SYS " /proc/mounts 2>/dev/null; then
+    # tmpfs 每次开机都是新目录，权限会退回 0700；0700 下普通 App 读不到任何 CA，
+    # 表现就是「所有 HTTPS 站点都弹证书不受信任」。这里每次都修正一次。
+    chmod 755 "$SYS" 2>/dev/null
+    chcon u:object_r:system_security_cacerts_file:s0 "$SYS" 2>/dev/null
+    chmod 644 "$SYS"/* 2>/dev/null
     cur=$(ls "$SYS" 2>/dev/null | wc -l | tr -d ' ')
     if [ -f "$SNAP/.count" ]; then
         base=$(cat "$SNAP/.count" 2>/dev/null | tr -d ' ')
@@ -96,6 +113,7 @@ for f in "$SRC"/*.0; do
     cp -f "$f" "$TMPD/$b" 2>/dev/null && added=$((added + 1))
 done
 chmod 644 "$TMPD"/* 2>/dev/null
+chmod 755 "$TMPD" 2>/dev/null
 chcon -R u:object_r:system_security_cacerts_file:s0 "$TMPD" 2>/dev/null
 
 expect=$((base + added))
@@ -113,7 +131,11 @@ mount -t tmpfs tmpfs "$SYS" 2>/dev/null || {
 }
 cp -a "$TMPD"/. "$SYS"/ 2>/dev/null
 chmod 644 "$SYS"/* 2>/dev/null
-chcon -R u:object_r:system_security_cacerts_file:s0 "$SYS" 2>/dev/null
+# 关键：tmpfs 挂载点的目录权限是 0700，必须显式改成 0755，
+# 否则 uid!=0 的进程（所有 App / WebView / Chrome）根本打不开这个目录，
+# 系统信任库对它们等于空 —— 于是每个 HTTPS 站点都弹「证书不受信任」。
+chmod 755 "$SYS" 2>/dev/null
+chcon u:object_r:system_security_cacerts_file:s0 "$SYS" 2>/dev/null
 
 # 安全阀：挂载后核对
 cur=$(ls "$SYS" 2>/dev/null | wc -l | tr -d ' ')

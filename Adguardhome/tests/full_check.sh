@@ -427,7 +427,7 @@ case "$_root" in
   *) bad "6081 根入口不是隐私页（/ 没返回跳转）" ;;
 esac
 case "$_pg" in
-  *20261130*) ok "privacy-page 构建号 20261130（可自证是新版）" ;;
+  *20261201*) ok "privacy-page 构建号 20261201（可自证是新版）" ;;
   *) bad "privacy-page 缺新构建号（无法判断浏览器吃的是哪版）" ;;
 esac
 
@@ -563,6 +563,28 @@ _n3=$(LC_ALL=C grep -a -c 'key:"sb",title:' "$_BIN" 2>/dev/null)
 [ "${_n3:-0}" -eq 0 ] && ok "内嵌前端：恶意网站拦截项已删除" || bad "内嵌前端仍有 sb 开关项"
 _n4=$(LC_ALL=C grep -a -c 'key:"par",title:' "$_BIN" 2>/dev/null)
 [ "${_n4:-0}" -eq 0 ] && ok "内嵌前端：成人内容过滤项已删除" || bad "内嵌前端仍有 par 开关项"
+
+# ============ 14. 系统信任库（MITM CA 必须对所有 App 可见）============
+hdr "14. 系统信任库"
+_SYS=/system/etc/security/cacerts
+if [ -d "$_SYS" ]; then
+    _mode=$(stat -c %a "$_SYS" 2>/dev/null)
+    [ "$_mode" = "755" ] && ok "信任库目录权限 0755（App 可读）" \
+                         || bad "信任库目录权限 ${_mode}（非 0755，所有 HTTPS 会弹证书错误）"
+    _lbl=$(ls -ldZ "$_SYS" 2>/dev/null | awk '{print $5}')
+    case "$_lbl" in
+        *system_security_cacerts_file*) ok "信任库目录 SELinux 标签正确" ;;
+        *) bad "信任库目录 SELinux 标签异常：$_lbl" ;;
+    esac
+    _cnt=$(su 2000 -c "ls $_SYS 2>/dev/null | wc -l" 2>/dev/null | tr -d ' ')
+    [ "${_cnt:-0}" -ge 100 ] && ok "非 root uid 可列举 $_cnt 张 CA" \
+                             || bad "非 root uid 只能列举 ${_cnt:-0} 张 CA（信任库对 App 不可见）"
+    for _h in 2c637461 e2b6a4fd; do
+        [ -f "$_SYS/$_h.0" ] && ok "模块 CA $_h.0 在信任库" || bad "模块 CA $_h.0 不在信任库"
+    done
+else
+    bad "系统信任库目录不存在"
+fi
 
 printf '\n================ 结果：PASS=%s FAIL=%s ================\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] && exit 0

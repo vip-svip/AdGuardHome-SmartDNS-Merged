@@ -1,7 +1,7 @@
 id=AdGuardHome
 name=AdGuard Home For Android
-version=20261130
-versionCode=20261130
+version=20261201
+versionCode=20261201
 updateJson=https://raw.githubusercontent.com/vip-svip/AdGuardHome-SmartDNS-Merged/main/update.json
 author=vip-svip
 description=AGH 面板 http://127.0.0.1:40251 账号 root 密码 root | SmartDNS 面板 http://127.0.0.1:6080 账号 root 密码 root | 隐私防护 http://127.0.0.1:6081/ | 上游服务器管理 http://127.0.0.1:6081/upstream-manage.html
