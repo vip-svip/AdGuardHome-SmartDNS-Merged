@@ -222,21 +222,6 @@
   // 没有历史（直接打开本页 / 新标签页）就跳回 SmartDNS 上游服务器页面。
   var SD_UPSTREAM = location.protocol + '//' + HOST + ':6080/dashboard/upstream-servers.html';
   function goBack() {
-    var canBack = false;
-    try {
-      canBack = (window.history.length > 1) && document.referrer !== '';
-    } catch (e) { canBack = false; }
-    if (canBack) {
-      window.history.back();
-      // history.back 在少数浏览器/WebView 里不会真的走，兜底延时跳转
-      setTimeout(function () {
-        if (document.visibilityState === 'visible' && !window.__aghBacked) {
-          location.href = SD_UPSTREAM;
-        }
-      }, 350);
-      window.__aghBacked = 1;
-      return;
-    }
     location.href = SD_UPSTREAM;
   }
   var msgTimer = null;

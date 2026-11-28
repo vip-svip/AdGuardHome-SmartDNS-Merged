@@ -704,6 +704,19 @@ start_webui() {
 }
 start_webui
 
+sync_sd_wwwroot() {
+    _wr="$SD_DIR/usr/share/smartdns/wwwroot"
+    [ -d "$_wr" ] || return 0
+    if [ -f "$WEBUI_DIR/upstream-manage.html" ]; then
+        cmp -s "$WEBUI_DIR/upstream-manage.html" "$_wr/upstream-manage.html" 2>/dev/null \
+            || { cp -f "$WEBUI_DIR/upstream-manage.html" "$_wr/upstream-manage.html" 2>/dev/null; chmod 644 "$_wr/upstream-manage.html" 2>/dev/null; }
+    fi
+    # 旧版本装过的自建隐私页，升级时清掉（两套同名页会让人以为有两个界面）
+    rm -f "$_wr/privacy.html" 2>/dev/null
+    return 0
+}
+sync_sd_wwwroot
+
 # 6081 管理面缓存预热：scripts/apps/certs/mitm 的列表响应冷算要 0.3~1.6s，
 # 首访时前端会先渲染空态再填充（看起来像「刷新后先是空的」）。
 # 这里开机后台各打一次强制重建，页面首访就是直接命中缓存。
@@ -1078,7 +1091,7 @@ fi
 fi
 _privacy_cgi="$SCRIPT_DIR/webui/cgi-bin/privacy"
 if [ -f "$_privacy_cgi" ]; then
-    [ -f "$AGH_DIR/privacy.conf" ] || printf 'dns=1\nvpn=1\nip=1\nsb=0\npar=0\nntp=1\ndhcp=1\nsmb=1\ntcp=1\nsnmp=1\n' > "$AGH_DIR/privacy.conf" 2>/dev/null
+    [ -f "$AGH_DIR/privacy.conf" ] || printf 'dns=1\nvpn=1\nip=1\nntp=1\ndhcp=1\nsmb=1\ntcp=1\nsnmp=1\n' > "$AGH_DIR/privacy.conf" 2>/dev/null
     sh "$_privacy_cgi" --apply >/dev/null 2>&1 &
 fi
 # VPN DNS 共存：把 AGH 端口注入常见 VPN / 内核代理的 nameserver，

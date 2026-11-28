@@ -2,33 +2,762 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>隐私防护 · 正在进入</title>
-<!--
-  6081 的根入口。为什么要有这个文件：
-  busybox httpd 给静态文件加不了 Cache-Control，浏览器会一直用旧副本，
-  于是 /privacy.html 这一条 URL 你刷新多少次都可能还是几天前的旧页面
-  （旧页面里既有 localStorage 快照分支、也还带着已经删掉的两个引擎开关，
-  表现出来就是「有的开关翻、有的不翻、还多两个开关」）。
-  这里改成：根路径 → 立刻跳到一个**每次都不同**的 URL（带毫秒时间戳），
-  缓存 key 每次都变，物理上不可能再命中旧副本。
--->
-<meta http-equiv="refresh" content="0;url=/cgi-bin/privacy-page">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>上游服务器管理 · SmartDNS</title>
 <style>
-body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
- background:#f4f6f8;color:#6b7280;font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
-@media (prefers-color-scheme:dark){body{background:#111418;color:#9aa0a6}}
-.box{text-align:center}
+  :root{--bg:#0f1420;--card:#182130;--line:#26324a;--fg:#e6edf7;--dim:#93a2bb;
+        --acc:#2563eb;--ok:#22c55e;--err:#ef4444;--chip:#1e2b40}
+  @media (prefers-color-scheme: light){
+    :root{--bg:#f4f6fb;--card:#fff;--line:#e2e8f2;--fg:#101826;--dim:#5b6b85;--chip:#eef3fb}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:16px 14px 90px;background:var(--bg);color:var(--fg);
+       font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;
+       -webkit-text-size-adjust:100%}
+  .wrap{max-width:780px;margin:0 auto}
+  .topbar{display:flex;align-items:center;gap:10px;margin:0 0 2px}
+  h1{font-size:18px;margin:0}
+  button.back{display:inline-flex;align-items:center;gap:4px;padding:6px 12px 6px 8px;
+       border-radius:20px;font-size:13.5px;font-weight:600;flex:0 0 auto;
+       background:var(--chip);border:1px solid var(--line);color:var(--fg);
+       -webkit-tap-highlight-color:transparent}
+  button.back:active{transform:scale(.96)}
+  button.back svg{display:block}
+  .sub{color:var(--dim);font-size:12.5px;margin-bottom:14px;word-break:break-all;line-height:1.5}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+  .card h2{font-size:14px;margin:0 0 10px;font-weight:600}
+  label{display:block;font-size:12.5px;color:var(--dim);margin-bottom:6px}
+  input[type=text]{width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);
+       background:transparent;color:var(--fg);font-size:15px;font-family:ui-monospace,Menlo,monospace}
+  input[type=text]:focus{outline:none;border-color:var(--acc)}
+  .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  button{padding:10px 15px;border-radius:10px;border:1px solid var(--line);background:transparent;
+       color:var(--fg);font-size:14px;font-family:inherit;cursor:pointer;white-space:nowrap}
+  button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+  button.danger{color:var(--err);border-color:var(--err);padding:7px 12px;font-size:13px}
+  button:disabled{opacity:.45;cursor:default}
+  ul{list-style:none;margin:0;padding:0}
+  li{display:flex;align-items:center;justify-content:space-between;gap:10px;
+     padding:11px 2px;border-bottom:1px solid var(--line);
+     font-family:ui-monospace,Menlo,monospace;font-size:14px}
+  li:last-child{border-bottom:0}
+  li .srv{word-break:break-all}
+  li .badge{font-size:11px;color:var(--dim);font-family:inherit;margin-left:6px}
+  h2 .badge{font-size:11px;font-weight:600;font-family:inherit;margin-left:8px;
+    padding:1px 8px;border-radius:999px;vertical-align:middle;
+    color:var(--dim);background:rgba(127,127,127,.14)}
+  h2 .badge.ok{color:var(--ok);background:rgba(34,197,94,.16)}
+  h2 .badge.warn{color:#eab308;background:rgba(234,179,8,.16)}
+  li .u{flex:1;word-break:break-all}
+  li .tag{flex:0 0 auto}
+  .msg{margin-top:10px;font-size:13px;min-height:20px;line-height:1.5}
+  .msg.ok{color:var(--ok)} .msg.err{color:var(--err)} .msg.warn{color:#eab308}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:4px}
+  .chip{display:inline-flex;align-items:center;gap:5px;padding:7px 11px;border-radius:20px;
+        border:1px solid var(--line);background:var(--chip);font-size:12.5px;cursor:pointer;
+        font-family:ui-monospace,Menlo,monospace}
+  .chip.added{opacity:.4;cursor:default;text-decoration:line-through}
+  .chip.tls{border-style:dashed;color:var(--dim)}
+  .hint{color:var(--dim);font-size:12.5px;margin-top:10px;line-height:1.7}
+  code{background:rgba(127,127,127,.16);padding:1px 5px;border-radius:4px;font-size:12px;
+       word-break:break-all}
+  .sticky{position:sticky;bottom:0;background:linear-gradient(transparent,var(--bg) 40%);
+          padding-top:12px;margin-top:4px}
 </style>
-<script>
-// 带毫秒时间戳跳转：每一次进入都是全新的缓存键，缓存里那份旧页面再也不会被命中。
-location.replace('/cgi-bin/privacy-page?v=' + Date.now());
-</script>
 </head>
 <body>
-<div class="box">
-  <div>正在进入隐私防护设置…</div>
-  <div style="font-size:12px;margin-top:8px">若 2 秒后仍停在当前页，点这里：<a href="/cgi-bin/privacy-page">打开设置页</a></div>
+<div class="wrap">
+  <div class="topbar">
+    <button id="btnBack" class="back" title="返回 SmartDNS 上游服务器页面">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M15 18l-6-6 6-6"/>
+      </svg>
+      <span>返回</span>
+    </button>
+    <h1>上游服务器管理</h1>
+  </div>
+  <div class="sub" id="path">文件：/data/adb/agh/smartdns/etc/smartdns/servers.conf</div>
+
+  <div class="card">
+    <h2>手动添加</h2>
+    <label for="srv">IP / 域名 / 带协议写法都可以</label>
+    <input id="srv" type="text" placeholder="119.29.29.29　dns.google　tls://dns.google　https://dns.google/dns-query" autocomplete="off" spellcheck="false">
+    <div class="row">
+      <button class="primary" id="btnAdd">添加</button>
+      <button id="btnReload">刷新</button>
+    </div>
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>一键添加（点击即加，已存在的会变灰；虚线框的需 TLS，本构建不支持）</h2>
+    <div class="chips" id="chips"></div>
+    <div class="hint">这些都是实测过延迟/成功率的公共 DNS。想更快就少加几个：上游越多，NXDOMAIN 类查询要等的答复越多。</div>
+  </div>
+
+  <div class="card">
+    <h2>当前生效的上游 <span class="badge" id="cnt"></span></h2>
+    <ul id="list"><li style="color:var(--dim)">加载中…</li></ul>
+  </div>
+
+
+  <div class="card">
+    <h2>加密上游 DoH / DoH3 / DoT / DoQ / DNSCrypt</h2>
+    <div class="sub" style="margin-bottom:8px">
+      本模块内置的 smartdns 构建没编译 TLS，所以这些条目由
+      <code>bin/dnsenc</code> 转成本地 <code>127.0.0.1:6054</code>，smartdns 再当普通上游用。
+    </div>
+    <label for="encsrv">写法：&lt;协议&gt; &lt;地址&gt;，裸地址默认当 DoT</label>
+    <input id="encsrv" type="text"
+           placeholder="doh https://dns.alidns.com/dns-query&#12288;dot dns.alidns.com"
+           autocomplete="off" spellcheck="false">
+    <div class="row">
+      <button class="primary" id="btnEncAdd">添加</button>
+      <button id="btnEncProbe">探测延迟</button>
+      <button id="btnEncRestart">重启加密转发</button>
+    </div>
+    <div class="chips" id="encChips"></div>
+    <div class="msg" id="encMsg"></div>
+    <ul id="encList"><li style="color:var(--dim)">加载中…</li></ul>
+  </div>
+
+  <div class="card">
+    <h2>VPN 共存 <span class="badge" id="vpnBadge">检测中…</span></h2>
+    <div class="sub" style="margin-bottom:8px">
+      <b>auto</b>（默认）检测到 VPN / 代理的隧道接口就把 DNS 劫持让路，解析完全交给 VPN，断开后 5 秒内自动恢复劫持。<br>
+      <b>proxy</b> 仍做 DNS 劫持，但「出接口是隧道」的查询和 VPN 应用自身的查询不劫持 —— 想让 AGH 继续过滤 VPN 流量选这个。<br>
+      <b>off</b> 不做任何 VPN 判断，全量劫持（老行为）。<br>
+      <span style="color:var(--dim)">改这一项不用重启；脚本 5 秒内自己重建规则。</span>
+    </div>
+    <div class="row">
+      <select id="vpnMode" style="flex:1;min-width:120px;height:40px;border-radius:10px;
+              border:1px solid var(--line);background:var(--bg2);color:var(--fg);padding:0 8px">
+        <option value="auto">auto · 让路（推荐）</option>
+        <option value="proxy">proxy · 串联</option>
+        <option value="off">off · 全量劫持</option>
+      </select>
+      <button class="primary" id="btnVpnApply">应用</button>
+      <button id="btnVpnRefresh">刷新状态</button>
+    </div>
+    <div class="msg" id="vpnMsg"></div>
+    <div class="sub" id="vpnState" style="margin-top:6px;color:var(--dim)">读取中…</div>
+
+    <h2 style="margin-top:16px">IPv6 的 DNS <span class="badge" id="v6Badge">读取中…</span></h2>
+    <div class="sub" style="margin-bottom:8px">
+      本机内核多数没有 <code>ip6table_nat</code>（会报 <code>Table does not exist</code>），
+      <code>TPROXY</code> 在 OUTPUT 又不可用，所以运营商下发的 v6 DNS（如 <code>2408:8888::8</code>）
+      原本能绕过过滤。两种做法：<br>
+      <b>auto</b>（默认）有 nat 表就用 REDIRECT 劫持，没有就自动退到 drop。<br>
+      <b>redirect</b> 只用 ip6tables nat 的 REDIRECT（会先试 modprobe ip6table_nat）。<br>
+      <b>drop</b> 在自己的 <code>AGH_V6DNS</code>（mangle 表）链里丢弃 v6 的 53 端口查询，
+      系统会回落到已被劫持的 v4 解析（实测差异在 1ms 量级）；纯 v6 网络里会导致解析失败。<br>
+      <b>keep</b> 完全不碰 v6。
+    </div>
+    <div class="row">
+      <select id="v6Mode" style="flex:1;min-width:120px;height:40px;border-radius:10px;
+              border:1px solid var(--line);background:var(--bg2);color:var(--fg);padding:0 8px">
+        <option value="auto">auto · 有 nat 用 redirect，否则 drop</option>
+        <option value="redirect">redirect · 仅 ip6tables nat</option>
+        <option value="drop">drop · mangle 丢弃 v6:53</option>
+        <option value="keep">keep · 不处理 v6</option>
+      </select>
+      <button class="primary" id="btnV6Apply">应用</button>
+    </div>
+    <div class="msg" id="v6Msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>按域名分流（哪些域名走加密上游）</h2>
+    <div class="sub" style="margin-bottom:8px">
+      SmartDNS 用 <code>domain-rules</code> 决定每个域名走哪组上游：<br>
+      <b>加密组 enc</b> = 上面的加密上游（经 <code>127.0.0.1:6054</code>）；<b>default</b> = 明文上游（最快）。<br>
+      加密组已经从默认解析里排除，所以没被点名的域名只跑明文上游，不会多等一次 DoH。
+    </div>
+    <div class="row">
+      <input id="ruledom" type="text" style="flex:2;min-width:150px"
+             placeholder="google.com 或 .google.com（含所有子域）"
+             autocomplete="off" spellcheck="false">
+      <select id="ruletarget" style="flex:1;min-width:110px;height:40px;border-radius:10px;
+              border:1px solid var(--line);background:var(--bg2);color:var(--fg);padding:0 8px">
+        <option value="enc">走加密 enc</option>
+        <option value="default">走明文 default</option>
+        <option value="block">拦截（返回 NXDOMAIN）</option>
+      </select>
+    </div>
+    <div class="row">
+      <button class="primary" id="btnRuleAdd">添加分流</button>
+      <button id="btnRuleRefresh">刷新规则</button>
+    </div>
+    <div class="chips" id="ruleChips"></div>
+    <div class="msg" id="ruleMsg"></div>
+    <ul id="ruleList"><li style="color:var(--dim)">加载中…</li></ul>
+  </div>
+
+  <div class="sticky">
+    <div class="row" style="margin-top:0">
+      <button class="primary" id="btnRestart" style="flex:1">重启 SmartDNS 生效</button>
+      <button id="btnFlush">清空缓存</button>
+    </div>
+  </div>
+
+  <div class="hint">
+    改完必须重启 SmartDNS 才生效。也可以直接编辑 <code>/data/adb/agh/smartdns/etc/smartdns/servers.conf</code>，或跑 <code>sh /data/adb/modules/AdGuardHome/scripts/sd-restart.sh</code>。<br>写法：<code>1.1.1.1</code>、<code>1.1.1.1:53</code>、<code>dns.google</code>、<code>tcp://8.8.8.8</code>、<code>tls://dns.google</code>、<code>https://dns.google/dns-query</code>（可直接写 <code>server 1.1.1.1</code>）。<br>注意：本模块内置的 smartdns 构建未编译 TLS，所以在上面「明文上游」区块里写 <code>tls://</code> / <code>https://</code> 只会显示 Unknown；要用加密 DNS 请写进下面的「加密上游」卡片，由 <code>bin/dnsenc</code> 中转。
+  </div>
 </div>
+
+<script>
+(function () {
+  // 同源优先：从 6081 直接打开（或端口转发）时走相对路径，避免写死端口。
+  // 只有从 SmartDNS 的 6080 wwwroot 打开时才回退到绝对地址。
+  // 同源优先：6081 直接打开走相对路径；6080 打开时用当前 hostname 拼 6081，
+  // 手机从局域网 IP 访问时不再误连到 127.0.0.1（浏览器自己）。
+  var HOST = location.hostname;
+  var API = (location.protocol === 'http:' && location.port !== '6080')
+    ? (location.origin + '/cgi-bin/upstream')
+    : (location.protocol + '//' + HOST + ':6081/cgi-bin/upstream');
+  var $ = function (id) { return document.getElementById(id); };
+
+  // 返回：优先 history.back（从 SmartDNS 上游服务器页点进来时最自然），
+  // 没有历史（直接打开本页 / 新标签页）就跳回 SmartDNS 上游服务器页面。
+  var SD_UPSTREAM = location.protocol + '//' + HOST + ':6080/dashboard/upstream-servers.html';
+  function goBack() {
+    location.href = SD_UPSTREAM;
+  }
+  var msgTimer = null;
+  var current = [];
+
+  var PRESETS = [
+    ['223.5.5.5', '\u963F\u91CC', 'cn'],
+    ['223.6.6.6', '\u963F\u91CC', 'cn'],
+    ['119.29.29.29', '\u817E\u8BAF', 'cn'],
+    ['119.28.28.28', '\u817E\u8BAF', 'cn'],
+    ['114.114.114.114', '\u7535\u4FE1', 'cn'],
+    ['114.114.115.115', '\u7535\u4FE1', 'cn'],
+    ['123.125.81.6', '\u767E\u5EA6', 'cn'],
+    ['180.76.76.76', '\u767E\u5EA6', 'cn'],
+    ['180.184.1.1', '\u5B57\u8282\uFF08\u5DF2\u5931\u6548\uFF09', 'cn'],
+    ['101.226.4.6', '\u7535\u4FE1', 'cn'],
+    ['1.2.4.8', '\u7535\u4FE1', 'cn'],
+    ['210.2.4.8', '\u7535\u4FE1', 'cn'],
+    ['8.8.8.8', 'Google', 'cn'],
+    ['1.1.1.1', 'Cloudflare', 'cn'],
+    ['9.9.9.9', 'Quad9', 'cn'],
+    ['dns.google', '\u57DF\u540D\u5199\u6CD5', 'en'],
+    ['one.one.one.one', '\u57DF\u540D\u5199\u6CD5', 'en'],
+    ['tls://dns.google', 'DoT \u672C\u6784\u5EFA\u4E0D\u652F\u6301', 'tls'],
+    ['https://dns.google/dns-query', 'DoH \u672C\u6784\u5EFA\u4E0D\u652F\u6301', 'tls']
+  ];
+
+  function say(text, kind) {
+    var m = $('msg');
+    m.textContent = text;
+    m.className = 'msg' + (kind ? ' ' + kind : '');
+    if (msgTimer) clearTimeout(msgTimer);
+    if (text) msgTimer = setTimeout(function () { m.textContent = ''; }, 7000);
+  }
+
+  function call(qs) {
+    return fetch(API + '?' + qs, { cache: 'no-store' }).then(function (r) { return r.json(); });
+  }
+
+  function addrOf(line) {
+    var m = /^(?:server(?:-tcp|-tls|-https|-udp)?)\s+(.+)$/.exec(line);
+    return m ? m[1].trim() : line.trim();
+  }
+
+  function renderChips() {
+    var box = $('chips');
+    box.innerHTML = '';
+    var have = current.map(addrOf);
+    PRESETS.forEach(function (p) {
+      var ip = p[0], note = p[1], kind = p[2] || 'cn';
+      var el = document.createElement('span');
+      var added = have.indexOf(ip) >= 0;
+      el.className = 'chip' + (added ? ' added' : '') + (kind === 'tls' ? ' tls' : '');
+      el.textContent = ip + ' \u00B7 ' + note;
+      el.title = added ? '\u5DF2\u5B58\u5728' : ('\u70B9\u51FB\u6DFB\u52A0 ' + ip);
+      if (!added) el.onclick = function () { quickAdd(ip, el); };
+      box.appendChild(el);
+    });
+  }
+
+  function render(list) {
+    current = list || [];
+    $('cnt').textContent = '(' + current.length + ' 个)';
+    var ul = $('list');
+    if (!current.length) {
+      ul.innerHTML = '<li style="color:var(--dim)">（空，请添加至少一个上游）</li>';
+      renderChips();
+      return;
+    }
+    ul.innerHTML = '';
+    current.forEach(function (s) {
+      var li = document.createElement('li');
+      var span = document.createElement('span');
+      span.className = 'srv';
+      span.textContent = s;
+      var btn = document.createElement('button');
+      btn.className = 'danger';
+      btn.textContent = '删除';
+      btn.onclick = function () { remove(s, btn); };
+      li.appendChild(span);
+      li.appendChild(btn);
+      ul.appendChild(li);
+    });
+    renderChips();
+  }
+
+  function load() {
+    return call('action=list').then(function (r) {
+      if (r && r.ok) { render(r.list); say(''); }
+      else { render([]); say('读取失败：' + ((r && r.error) || '未知错误'), 'err'); }
+    }).catch(function (e) {
+      render([]);
+      say('连不上本地管理服务（' + e.message + '）。请确认模块已启动：设置里点一次 AdGuardHome 的 Action，或重启手机。', 'err');
+    });
+  }
+
+  function quickAdd(ip, el) {
+    el.style.opacity = '.35';
+    call('action=add&srv=' + encodeURIComponent(ip)).then(function (r) {
+      if (r && r.ok) {
+        render(r.list);
+        if (r.warn) say('已添加 ' + ip + '。提示：' + r.warn, 'warn');
+        else say('已添加 ' + ip + '，记得点下面的「重启 SmartDNS 生效」', 'ok');
+      }
+      else { el.style.opacity = ''; say('添加失败：' + ((r && r.error) || '未知错误'), 'err'); }
+    }).catch(function (e) { el.style.opacity = ''; say('请求失败：' + e.message, 'err'); });
+  }
+
+  function add() {
+    var v = ($('srv').value || '').trim();
+    if (!v) { say('请输入上游服务器地址', 'err'); return; }
+    $('btnAdd').disabled = true;
+    call('action=add&srv=' + encodeURIComponent(v)).then(function (r) {
+      $('btnAdd').disabled = false;
+      if (r && r.ok) {
+        $('srv').value = '';
+        render(r.list);
+        if (r.warn) { say('已添加 ' + v + '。提示：' + r.warn, 'warn'); }
+        else { say('已添加 ' + v + '，记得点下面的「重启 SmartDNS 生效」', 'ok'); }
+      } else {
+        say('添加失败：' + ((r && r.error) || '未知错误'), 'err');
+      }
+    }).catch(function (e) {
+      $('btnAdd').disabled = false;
+      say('请求失败：' + e.message, 'err');
+    });
+  }
+
+  function remove(s, btn) {
+    btn.disabled = true;
+    call('action=del&srv=' + encodeURIComponent(s)).then(function (r) {
+      if (r && r.ok) { render(r.list); say('已删除 ' + s + '，记得重启 SmartDNS', 'ok'); }
+      else { btn.disabled = false; say('删除失败：' + ((r && r.error) || '未知错误'), 'err'); }
+    }).catch(function (e) { btn.disabled = false; say('请求失败：' + e.message, 'err'); });
+  }
+
+  function restart() {
+    $('btnRestart').disabled = true;
+    say('正在重启 SmartDNS…');
+    call('action=restart').then(function (r) {
+      $('btnRestart').disabled = false;
+      if (r && r.ok) say('已重启，' + (r.msg || '新配置已生效'), 'ok');
+      else say('重启失败：' + ((r && r.error) || '未知错误'), 'err');
+    }).catch(function (e) { $('btnRestart').disabled = false; say('请求失败：' + e.message, 'err'); });
+  }
+
+  function flush() {
+    $('btnFlush').disabled = true;
+    call('action=flush').then(function (r) {
+      $('btnFlush').disabled = false;
+      say(r && r.ok ? '缓存已清空' : ('清空失败：' + ((r && r.error) || '未知')), r && r.ok ? 'ok' : 'err');
+    }).catch(function (e) { $('btnFlush').disabled = false; say('请求失败：' + e.message, 'err'); });
+  }
+
+
+  // ---------------- 加密上游 ----------------
+  // 实测（本机 18e1870，每项 3 轮取平均；毫秒越小越好）：
+  //   DoH 223.5.5.5    105ms   DoT 223.6.6.6    108ms   DoT 223.5.5.5    110ms
+  //   DoQ dns.alidns    115ms   DoH 223.6.6.6    107ms   DoH alidns/query 134ms
+  //   DoH doh.360.cn    138ms   DoH 1.12.12.12   178ms   DoT 120.53.53.53 183ms
+  //   DoT dot.pub       244ms   DoH doh.pub       250ms
+  // 不可用（超时/被 reset，不要加）：dns.google 6s、cloudflare 2.5-8s、
+  //   dns.adguard-dns.com 5-18s、dot dns.qq.com 6s、dot dns.360.cn 8s、
+  //   doq dot.pub / doq dns.360.cn / dot 1.1.1.1 全部超时。
+  var ENC_PRESETS = [
+    ['doh https://223.5.5.5/dns-query', '\u963F\u91CC DoH(IP) 105ms'],
+    ['doh https://223.6.6.6/dns-query', '\u963F\u91CC DoH(IP2) 107ms'],
+    ['dot 223.5.5.5', '\u963F\u91CC DoT(IP) 110ms'],
+    ['dot 223.6.6.6', '\u963F\u91CC DoT(IP2) 108ms'],
+    ['doq dns.alidns.com', '\u963F\u91CC DoQ 115ms'],
+    ['doh https://dns.alidns.com/dns-query', '\u963F\u91CC DoH(域名) 134ms'],
+    ['dot dns.alidns.com', '\u963F\u91CC DoT(域名) 138ms'],
+    ['doh https://doh.360.cn/dns-query', '360 DoH 138ms'],
+    ['doh https://1.12.12.12/dns-query', 'DNSPod DoH(IP) 178ms'],
+    ['dot 120.53.53.53', 'DNSPod DoT(IP) 183ms'],
+    ['doh https://doh.pub/dns-query', '\u817E\u8BAF DoH 250ms'],
+    ['dot dot.pub', '\u817E\u8BAF DoT 244ms']
+  ];
+  var encCur = [];
+  var encRun = false;
+
+  function encSay(text, kind) {
+    var m = $('encMsg');
+    m.textContent = text;
+    m.className = 'msg' + (kind ? ' ' + kind : '');
+  }
+
+  function encRender(list, running) {
+    encCur = list || [];
+    encRun = !!running;
+    var ul = $('encList');
+    ul.innerHTML = '';
+    if (!encCur.length) {
+      ul.innerHTML = '<li style="color:var(--dim)">\uFF08\u7A7A\uFF0C\u5F53\u524D\u53EA\u8D70\u660E\u6587 UDP \u4E0A\u6E38\uFF09</li>';
+    } else {
+      encCur.forEach(function (line) {
+        var li = document.createElement('li');
+        var span = document.createElement('span');
+        span.className = 'srv';
+        span.textContent = line;
+        var btn = document.createElement('button');
+        btn.className = 'danger';
+        btn.textContent = '\u5220\u9664';
+        btn.onclick = function () { encDel(line, btn); };
+        li.appendChild(span);
+        li.appendChild(btn);
+        ul.appendChild(li);
+      });
+    }
+    var box = $('encChips');
+    box.innerHTML = '';
+    ENC_PRESETS.forEach(function (p) {
+      var val = p[0];
+      var el = document.createElement('span');
+      var added = encCur.indexOf(val) >= 0;
+      el.className = 'chip' + (added ? ' added' : '');
+      el.textContent = val.split(' ')[0].toUpperCase() + ' \u00B7 ' + p[1];
+      if (!added) el.onclick = function () { encAdd(val, el); };
+      box.appendChild(el);
+    });
+    say_enc_state();
+  }
+
+  function say_enc_state() {
+    if (!encCur.length) { encSay('\u672A\u542F\u7528\uFF08\u52A0\u4E00\u6761\u5373\u53EF\u5F00\u542F\uFF09', ''); return; }
+    encSay(encRun ? ('\u8F6C\u53D1\u8FD0\u884C\u4E2D \u00B7 ' + encCur.length + ' \u6761 \u2192 127.0.0.1:6054')
+                  : ('\u5DF2\u914D\u7F6E ' + encCur.length + ' \u6761\uFF0C\u4F46\u8F6C\u53D1\u6CA1\u5728\u8DD1\uFF0C\u70B9\u300C\u91CD\u542F\u52A0\u5BC6\u8F6C\u53D1\u300D'),
+           encRun ? 'ok' : 'warn');
+  }
+
+
+  // ---------- 按域名分流 ----------
+  var RULE_PRESETS = [
+    ['google.com', 'enc'], ['youtube.com', 'enc'], ['github.com', 'enc'],
+    ['openai.com', 'enc'], ['wikipedia.org', 'enc'], ['telegram.org', 'enc'],
+    ['qq.com', 'default'], ['taobao.com', 'default'], ['bilibili.com', 'default']
+  ];
+
+  function ruleSay(t, kind) {
+    var el = $('ruleMsg');
+    el.textContent = t;
+    el.style.color = kind === 'ok' ? 'var(--ok, #16a34a)'
+                    : kind === 'err' ? 'var(--err, #dc2626)' : 'var(--dim)';
+    if (msgTimer) { clearTimeout(msgTimer); }
+    msgTimer = setTimeout(function () { el.textContent = ''; }, 6000);
+  }
+
+  function ruleParse(line) {
+    var m = /^\s*domain-rules\s+\/([^/]+)\/\s+(.*)$/.exec(line);
+    if (!m) { return { dom: line, kind: '?', text: line }; }
+    var dom = m[1], opt = m[2];
+    if (/-nameserver\s+enc/.test(opt)) { return { dom: dom, kind: 'enc', text: '加密 enc' }; }
+    if (/-nameserver\s+default/.test(opt)) { return { dom: dom, kind: 'default', text: '明文 default' }; }
+    if (/-address/.test(opt)) { return { dom: dom, kind: 'block', text: '拦截 NXDOMAIN' }; }
+    return { dom: dom, kind: '?', text: opt };
+  }
+
+  function ruleRender(r) {
+    var ul = $('ruleList');
+    ul.innerHTML = '';
+    var list = (r && r.list) || [];
+    if (!list.length) {
+      ul.innerHTML = '<li style="color:var(--dim)">还没有分流规则（所有域名都走明文上游）</li>';
+    }
+    list.forEach(function (line) {
+      var it = ruleParse(line);
+      var li = document.createElement('li');
+      var span = document.createElement('span');
+      span.className = 'u';
+      span.textContent = it.dom;
+      var tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = it.text;
+      tag.style.marginLeft = '8px';
+      tag.style.color = it.kind === 'enc' ? '#2563eb'
+                       : it.kind === 'block' ? '#dc2626' : 'var(--dim)';
+      var del = document.createElement('button');
+      del.className = 'danger';
+      del.textContent = '\u5220\u9664';
+      del.onclick = function () { ruleDel(it.dom); };
+      li.appendChild(span);
+      li.appendChild(tag);
+      li.appendChild(del);
+      ul.appendChild(li);
+    });
+    var encOk = r && r.encCount > 0;
+    if (!encOk) {
+      var note = document.createElement('li');
+      note.style.color = 'var(--dim)';
+      note.textContent = '提示：还没有可用的加密上游，走 enc 的规则会被自动注释掉。';
+      ul.appendChild(note);
+    }
+  }
+
+  function ruleLoad() {
+    fetch(API + '?action=ruleslist&_=' + Date.now())
+      .then(function (r) { return r.json(); })
+      .then(function (r) { if (r && r.ok) { ruleRender(r); } })
+      .catch(function () { ruleSay('读取分流规则失败', 'err'); });
+  }
+
+  function ruleAdd() {
+    var d = ($('ruledom').value || '').trim();
+    var t = $('ruletarget').value;
+    if (!d) { ruleSay('请填写域名', 'err'); return; }
+    ruleSay('正在写入并重启 SmartDNS…');
+    fetch(API + '?action=ruleadd&target=' + encodeURIComponent(t) + '&dom=' + encodeURIComponent(d))
+      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (r && r.ok) {
+          ruleSay(r.warn || '已添加，SmartDNS 已重启', 'ok');
+          $('ruledom').value = '';
+          ruleRender(r);
+        } else {
+          ruleSay((r && r.error) || '添加失败', 'err');
+        }
+      })
+      .catch(function () { ruleSay('请求失败', 'err'); });
+  }
+
+  function ruleDel(dom) {
+    fetch(API + '?action=ruledel&dom=' + encodeURIComponent(dom))
+      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (r && r.ok) { ruleSay(r.warn || '已删除', 'ok'); ruleRender(r); }
+        else { ruleSay((r && r.error) || '删除失败', 'err'); }
+      })
+      .catch(function () { ruleSay('请求失败', 'err'); });
+  }
+
+  function ruleChips() {
+    var box = $('ruleChips');
+    box.innerHTML = '';
+    RULE_PRESETS.forEach(function (p) {
+      var b = document.createElement('button');
+      b.className = 'chip';
+      b.textContent = p[0] + ' \u2192 ' + (p[1] === 'enc' ? '\u52a0\u5bc6' : '\u660e\u6587');
+      b.onclick = function () {
+        $('ruledom').value = p[0];
+        $('ruletarget').value = p[1];
+        ruleAdd();
+      };
+      box.appendChild(b);
+    });
+  }
+
+  // ---------------- VPN 共存 ----------------
+  function vpnSay(t, kind) {
+    var el = $('vpnMsg');
+    if (!el) return;
+    el.textContent = t || '';
+    el.className = 'msg' + (kind ? ' ' + kind : '');
+    if (t) { setTimeout(function () { el.textContent = ''; }, 6000); }
+  }
+
+  function v6Say(s, bad) {
+    var el = $('v6Msg');
+    if (!el) return;
+    el.textContent = s || '';
+    el.style.color = bad ? '#eab308' : 'var(--dim)';
+  }
+
+  function v6Render(r) {
+    if (!r || !r.ok) { return; }
+    var b = $('v6Badge');
+    var eff = r.v6_mode || r.effective || 'auto';
+    var on = !!r.v6_hijack;
+    var nat = !!r.v6_nat;
+    if (b) {
+      b.className = 'badge ' + (on ? 'ok' : 'warn');
+      b.textContent = (on ? '已劫持 · ' : '未劫持 · ') + eff + (nat ? ' · nat' : ' · mangle');
+    }
+  }
+
+  function vpnRender(r) {
+    var badge = $('vpnBadge'), st = $('vpnState');
+    if (!r || !r.ok) {
+      if (badge) { badge.textContent = '未知'; }
+      if (st) { st.textContent = (r && r.error) ? r.error : '读取 VPN 状态失败'; }
+      return;
+    }
+    var mode = r.mode || 'auto';
+    var sel = $('vpnMode');
+    if (sel) { sel.value = mode; }
+    var ifs = (r.ifaces || '').trim();
+    var active = !!r.vpn_active;
+    var hij = r.hijack;
+    if (badge) {
+      badge.textContent = hij ? '劫持生效' : '已让路';
+      badge.className = 'badge ' + (hij ? 'ok' : 'warn');
+    }
+    if (st) {
+      var lines = [];
+      lines.push('模式 ' + mode + (active ? ' ｜ 检测到隧道接口 ' + ifs : ' ｜ 未检测到隧道接口'));
+      lines.push('OUTPUT 跳转 ' + (r.jump ? '在' : '不在') +
+                 ' ｜ ADGUARD 链 ' + (r.rules || 0) + ' 条' +
+                 ' ｜ REDIRECT ' + (r.redirect ? (r.redirect + ' 条') : '无'));
+      if (r.uids) { lines.push('已豁免 VPN 应用 uid：' + r.uids); }
+      if (r.note) { lines.push(r.note); }
+      st.innerHTML = lines.join('<br>');
+    }
+    v6Render(r);
+  }
+
+  function vpnLoad() {
+    return call('action=vpnstatus')
+      .then(function (r) { vpnRender(r); return r; })
+      .catch(function () { vpnRender(null); });
+  }
+
+  function vpnApply() {
+    var sel = $('vpnMode');
+    if (!sel) return;
+    var m = sel.value;
+    var btn = $('btnVpnApply');
+    btn.disabled = true;
+    call('action=vpnmode&mode=' + encodeURIComponent(m))
+      .then(function (r) {
+        btn.disabled = false;
+        if (r && r.ok) {
+          vpnSay(r.msg || '已切换', 'ok');
+          vpnRender(r);
+          setTimeout(vpnLoad, 2500);
+        } else {
+          vpnSay((r && r.error) || '切换失败', 'err');
+        }
+      })
+      .catch(function (e) { btn.disabled = false; vpnSay('请求失败：' + e.message, 'err'); });
+  }
+
+  function encLoad() {
+    return call('action=enclist').then(function (r) {
+      if (r && r.ok) encRender(r.list, r.running);
+      else encRender([], false);
+    }).catch(function () { encRender([], false); });
+  }
+
+  function encAdd(val, el) {
+    var v = (val || $('encsrv').value || '').trim();
+    if (!v) { encSay('\u8BF7\u8F93\u5165\u52A0\u5BC6\u4E0A\u6E38', 'err'); return; }
+    if (el) el.style.opacity = '.35';
+    encSay('\u6B63\u5728\u6DFB\u52A0\u2026');
+    call('action=encadd&srv=' + encodeURIComponent(v)).then(function (r) {
+      if (el) el.style.opacity = '';
+      if (r && r.ok) {
+        $('encsrv').value = '';
+        encRender(r.list, r.running);
+        if (r.warn) encSay('\u5DF2\u6DFB\u52A0\u3002' + r.warn, 'warn');
+        else encSay('\u5DF2\u6DFB\u52A0 ' + v, 'ok');
+      } else {
+        encSay('\u6DFB\u52A0\u5931\u8D25\uFF1A' + ((r && r.error) || '\u672A\u77E5\u9519\u8BEF'), 'err');
+      }
+    }).catch(function (e) {
+      if (el) el.style.opacity = '';
+      encSay('\u8BF7\u6C42\u5931\u8D25\uFF1A' + e.message, 'err');
+    });
+  }
+
+  function encDel(line, btn) {
+    btn.disabled = true;
+    call('action=encdel&srv=' + encodeURIComponent(line)).then(function (r) {
+      if (r && r.ok) { encRender(r.list, r.running); encSay('\u5DF2\u5220\u9664 ' + line, 'ok'); }
+      else { btn.disabled = false; encSay('\u5220\u9664\u5931\u8D25\uFF1A' + ((r && r.error) || '\u672A\u77E5'), 'err'); }
+    }).catch(function (e) { btn.disabled = false; encSay('\u8BF7\u6C42\u5931\u8D25\uFF1A' + e.message, 'err'); });
+  }
+
+  function encProbe() {
+    if (!encCur.length) { encSay('\u5148\u6DFB\u52A0\u4E00\u6761\u52A0\u5BC6\u4E0A\u6E38', 'err'); return; }
+    $('btnEncProbe').disabled = true;
+    encSay('\u6B63\u5728\u9010\u6761\u63A2\u6D4B\uFF08\u6700\u591A 5 \u79D2\uFF09\u2026');
+    call('action=encprobe').then(function (r) {
+      $('btnEncProbe').disabled = false;
+      if (r && r.items) {
+        var parts = r.items.map(function (it) {
+          return (it.ok ? '\u2713 ' : '\u2717 ') + it.raw + '  ' + it.ms + 'ms' +
+                 (it.ok ? '' : ('  ' + (it.error || '')));
+        });
+        encSay(parts.join('\n'), r.ok ? 'ok' : 'warn');
+        $('encMsg').style.whiteSpace = 'pre-wrap';
+      } else {
+        encSay('\u63A2\u6D4B\u5931\u8D25\uFF1A' + ((r && (r.error || r.msg)) || '\u65E0\u8F93\u51FA'), 'err');
+      }
+    }).catch(function (e) { $('btnEncProbe').disabled = false; encSay('\u8BF7\u6C42\u5931\u8D25\uFF1A' + e.message, 'err'); });
+  }
+
+  function encRestart() {
+    $('btnEncRestart').disabled = true;
+    encSay('\u6B63\u5728\u91CD\u542F\u52A0\u5BC6\u8F6C\u53D1\u4E0E SmartDNS\u2026');
+    call('action=encrestart').then(function (r) {
+      $('btnEncRestart').disabled = false;
+      if (r && r.ok) { encSay(r.msg || '\u5DF2\u91CD\u542F', 'ok'); encLoad(); }
+      else encSay('\u5931\u8D25\uFF1A' + ((r && (r.error || r.warn)) || '\u672A\u77E5'), 'err');
+    }).catch(function (e) { $('btnEncRestart').disabled = false; encSay('\u8BF7\u6C42\u5931\u8D25\uFF1A' + e.message, 'err'); });
+  }
+
+  $('btnEncAdd').onclick = function () { encAdd(); };
+  $('btnEncProbe').onclick = encProbe;
+  $('btnEncRestart').onclick = encRestart;
+  $('encsrv').addEventListener('keydown', function (e) { if (e.key === 'Enter') encAdd(); });
+
+  $('btnAdd').onclick = add;
+  $('btnReload').onclick = load;
+  $('btnRestart').onclick = restart;
+  $('btnFlush').onclick = flush;
+  $('srv').addEventListener('keydown', function (e) { if (e.key === 'Enter') add(); });
+
+  if ($('btnBack')) $('btnBack').onclick = goBack;
+
+  load();
+  encLoad();
+  vpnLoad();
+  if ($('btnVpnApply')) { $('btnVpnApply').onclick = vpnApply; }
+  if ($('btnVpnRefresh')) { $('btnVpnRefresh').onclick = function () { vpnLoad(); }; }
+
+  if ($('btnV6Apply')) $('btnV6Apply').onclick = function () {
+    var sel = $('v6Mode');
+    var m = sel ? sel.value : 'auto';
+    var btn = $('btnV6Apply');
+    btn.disabled = true;
+    v6Say('正在应用 ' + m + ' …');
+    call('action=v6mode&mode=' + encodeURIComponent(m)).then(function (r) {
+      btn.disabled = false;
+      if (r && r.ok) {
+        v6Say('已设为 ' + m + '，实际生效 ' + (r.effective || m));
+        v6Render(r);
+        setTimeout(vpnLoad, 2500);
+      } else {
+        v6Say('设置失败：' + ((r && (r.error || r.warn)) || '未知错误'), true);
+      }
+    }).catch(function (e) { btn.disabled = false; v6Say('设置失败：' + e.message, true); });
+  };
+  ruleChips();
+  ruleLoad();
+  $('btnRuleAdd').onclick = ruleAdd;
+  $('btnRuleRefresh').onclick = function () { ruleLoad(); ruleSay('已刷新'); };
+})();
+</script>
 </body>
 </html>
