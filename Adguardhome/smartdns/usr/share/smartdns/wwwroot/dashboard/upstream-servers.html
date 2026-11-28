@@ -3,36 +3,82 @@
 
 <script id="agh-upm-native">
 (function(){
-  if (window.__aghUpmOpen) return;
-  var state=null;
-  function close(){ if(state&&state.parentNode) state.parentNode.removeChild(state); state=null; }
+  if (window.__aghUpmOn) return;
+  window.__aghUpmOn = 1;
+  var wrap = null;
+  function close(){ if(wrap && wrap.parentNode){ wrap.parentNode.removeChild(wrap); } wrap = null; }
   function open(){
-    if(state) return;
-    var sw=0;
-    var els=document.querySelectorAll('div');
-    for(var i=0;i<els.length;i++){var cs=getComputedStyle(els[i]);
-      if(cs.position==='fixed'&&cs.top==='0px'&&cs.left==='0px'){var w=parseFloat(cs.width);
-        if(w>100&&w<500&&getComputedStyle(els[i]).display!=='none'){sw=w;break;}}}
-    var wrap=document.createElement('div');
-    wrap.style.cssText='position:fixed;top:0;left:'+sw+'px;right:0;bottom:0;z-index:1200;background:var(--mui-palette-background-default, #fff);display:flex;flex-direction:column;';
-    var bar=document.createElement('div');
-    bar.style.cssText='height:44px;display:flex;align-items:center;padding:0 12px;gap:8px;border-bottom:1px solid var(--mui-palette-divider, #ddd);background:var(--mui-palette-background-paper, #fff);';
-    var btn=document.createElement('button');
-    btn.textContent='\u2190 \u8fd4\u56de';
-    btn.style.cssText='border:none;background:transparent;color:var(--mui-palette-primary-main, #1976d2);font-size:14px;cursor:pointer;padding:6px 10px;';
-    btn.onclick=close;
-    var ttl=document.createElement('span');
-    ttl.textContent='\u4e0a\u6e38\u670d\u52a1\u5668\u7ba1\u7406';
-    ttl.style.cssText='font-weight:600;font-size:15px;';
-    bar.appendChild(btn);bar.appendChild(ttl);
-    var fr=document.createElement('iframe');
-    fr.src='/upstream-manage.html';
-    fr.style.cssText='flex:1 1 auto;width:100%;border:0;';
-    wrap.appendChild(bar);wrap.appendChild(fr);
+    if(wrap) return;
+    wrap = document.createElement('div');
+    wrap.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:1250;background:#fff;display:flex;flex-direction:column;';
+    var bar = document.createElement('div');
+    bar.style.cssText = 'height:46px;display:flex;align-items:center;gap:10px;padding:0 14px;border-bottom:1px solid rgba(0,0,0,.12);background:#fff;flex:0 0 auto;';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '\u2190 \u8fd4\u56de';
+    btn.style.cssText = 'border:0;background:transparent;color:#1976d2;font-size:15px;padding:6px 8px;cursor:pointer;';
+    btn.onclick = close;
+    var ttl = document.createElement('span');
+    ttl.textContent = '\u4e0a\u6e38\u670d\u52a1\u5668\u7ba1\u7406';
+    ttl.style.cssText = 'font-weight:600;font-size:15px;';
+    bar.appendChild(btn);
+    bar.appendChild(ttl);
+    var fr = document.createElement('iframe');
+    fr.src = '/upstream-manage.html';
+    fr.style.cssText = 'flex:1 1 auto;width:100%;border:0;display:block;';
+    wrap.appendChild(bar);
+    wrap.appendChild(fr);
     document.body.appendChild(wrap);
-    state=wrap;
   }
-  window.__aghUpmOpen=open;
-  window.__aghUpmClose=close;
+  window.__aghUpmOpen = open;
+  window.__aghUpmClose = close;
+  function hasSide(){
+    return !!document.querySelector('[class*="MuiDrawer"], nav');
+  }
+  function mount(){
+    if (document.getElementById('agh-upm-btn')) return;
+    if (!hasSide()) return;
+    var b = document.createElement('button');
+    b.id = 'agh-upm-btn';
+    b.type = 'button';
+    b.textContent = '\u7ba1\u7406\u4e0a\u6e38\u670d\u52a1\u5668';
+    b.style.cssText = 'display:inline-block;margin-left:14px;padding:4px 16px;border-radius:14px;border:0;background:#1976d2;color:#fff;font-size:13px;line-height:1.5;cursor:pointer;vertical-align:middle;';
+    var hn = null, hs = document.querySelectorAll('h1,h2,h3,h4,h5,h6');
+    for (var i = 0; i < hs.length; i++) {
+      if ((hs[i].textContent || '').trim() === '\u4e0a\u6e38\u670d\u52a1\u5668') { hn = hs[i]; break; }
+    }
+    if (hn && hn.parentNode) {
+      hn.parentNode.insertBefore(b, hn.nextSibling);
+    } else {
+      b.style.cssText = 'position:fixed;bottom:220px;right:24px;z-index:2147483600;padding:10px 18px;border-radius:24px;border:0;background:#1976d2;color:#fff;font-size:14px;line-height:1.2;cursor:pointer;';
+      document.body.appendChild(b);
+    }
+    b.onclick = fire;
+  }
+  function inBtn(x, y){
+    var b = document.getElementById('agh-upm-btn');
+    if (!b) return false;
+    var r = b.getBoundingClientRect();
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  }
+  function fire(){
+    try { open(); } catch (e) { location.href = '/upstream-manage.html'; }
+  }
+  document.addEventListener('touchend', function(ev){
+    var t = ev.changedTouches && ev.changedTouches[0];
+    if (t && inBtn(t.clientX, t.clientY)) { ev.preventDefault(); ev.stopPropagation(); fire(); }
+  }, true);
+  document.addEventListener('mousedown', function(ev){
+    if (inBtn(ev.clientX, ev.clientY)) { ev.preventDefault(); ev.stopPropagation(); fire(); }
+  }, true);
+  document.addEventListener('click', function(ev){
+    if (inBtn(ev.clientX, ev.clientY)) { ev.preventDefault(); ev.stopPropagation(); fire(); }
+  }, true);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mount);
+  } else {
+    mount();
+  }
+  new MutationObserver(mount).observe(document.body, { childList: true, subtree: true });
 })();
 </script></body></html>

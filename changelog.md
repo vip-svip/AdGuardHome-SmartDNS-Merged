@@ -1,3 +1,19 @@
+## 20261214
+- **AdGuardHome 侧栏：删掉「上游服务器」入口**
+  - `src/client_v2/src/common/ui/Menu/Menu.tsx` 移除 `smartdns_upstream` 的 `<div><a href="http://127.0.0.1:6081/upstream-manage.html">`，保留 `smartdns_ui`（→ 6080）
+  - `__locales/en.json`、`zh-cn.json` 删 `smartdns_upstream_manage` 键
+  - 重建后 `main.d45b273e62461964a1a2.js`：`upstream-manage` 0 次、`6081` 只剩隐私页 endpoint
+- **SmartDNS 侧栏：删掉独立整页的 Upstream Manage 项**
+  - `_next/static/chunks/c810cf60f955d2e8.js` 的 nav 数组剔除 `{key:"upstream-manage",...,fullPage:!0}`，25,709B → 25,594B / md5 `d765f8f44ff9e73e436b06caed5f7fc0`
+  - 侧栏变为 仪表盘 / 查询日志 / 上游服务器 / 客户端 / 日志 / 设置 / AdGuard Home
+- **上游服务器管理内置进 SmartDNS 自己的页面**
+  - `dashboard/upstream-servers.html` 注入：标题「上游服务器」右侧挂「管理上游服务器」胶囊按钮；点开是同源全屏浮层（`/upstream-manage.html` iframe，顶部「← 返回」+ 标题）
+  - 6081 只当后端（CGI `cgi-bin/upstream`，带 `Access-Control-Allow-Origin: *`），不再对外挂独立页面入口
+  - 实测：点按钮 → 浮层弹出，内含 手动添加 / 一键添加 / 当前生效的上游 / 加密上游 / VPN 共存 / IPv6 / 域名规则 / 保存并重启
+- **新 bin**：`bin/AdGuardHome` 23,396,512B / md5 `1a3678ed12d36ef3c15c71e52acfcc10`（src 全量重编译，`npm run build-prod` + `go build -s -w -trimpath`）
+  - 字符串核查：`upstream-manage` 0、`smartdns_upstream` 0、`smartdns_upstream_manage` 0、`6081/cgi-bin/privacy` 1、`恶意网站拦截` 0
+- `dashboard/upstream-servers.html` 46,157B / md5 `c7ac5ded586000a30b625025cc9e5012`
+
 ## 20261213
 - **隐私页改成源码级重建，不再打二进制补丁**
   - 新增 `src/client_v2/src/components/Privacy/`（`Privacy.tsx` + `Privacy.module.pcss`），在 `Paths.ts` 注册 `Privacy`，在 `App/index.tsx` 挂 `<Route>`，在 `Menu.tsx` 侧栏加「隐私」项（lock 图标，位于查询日志与 SmartDNS 之间）

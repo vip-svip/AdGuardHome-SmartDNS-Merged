@@ -1,6 +1,6 @@
 {
-  "version": "20261213",
-  "versionCode": 2026121301,
-  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261213/AdGuardHome-SmartDNS-Merged-20261213.zip",
-  "changelog": "[20261213] 隐私页从源码重建：不再对 bin/AdGuardHome 打二进制补丁，改为在 src/client_v2 里从零写出 Privacy 页并重新编译整个 AGH。开关跳变的根因在内嵌前端——初值写成 8 项全 true，再把同步 XHR 塞进挂载后的 effect，首帧全绿、effect 跑完才被 conf 覆盖，conf 里有 0 的项必然「先绿后灰」。新页面把同步 XHR 挪到 createSignal 的初值位，signal 一出生就是真值，首帧即 conf，没有第二帧；点开关只改本地 signal + 发一次 POST，回调不回写、无 effect 重新 GET。键集固定 8 个，sb/par 废键彻底消失。页面按原版 1:1 复刻：h1 标题 + 8 个 SettingRow（switch/align top/title+description）+ 4 个外链检测 + 说明；不含恶意网站拦截、成人内容过滤、一键过检测；侧栏新增「隐私」，无证书/脚本"
+  "version": "20261214",
+  "versionCode": 2026121401,
+  "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261214/AdGuardHome-SmartDNS-Merged-20261214.zip",
+  "changelog": "[20261214] AdGuardHome 侧栏删掉「上游服务器」入口，只剩 仪表盘/设置/过滤器/查询日志/隐私/SmartDNS；SmartDNS 侧栏删掉独立整页的 Upstream Manage 项，上游服务器管理改为内嵌：上游服务器页标题行带「管理上游服务器」胶囊按钮，点开是同源全屏浮层（/upstream-manage.html iframe + 顶部「← 返回」），不再整页跳走。新 bin 由 src 全量重编译，字符串核查 upstream-manage/smartdns_upstream/smartdns_upstream_manage 均为 0。"
 }

@@ -138,20 +138,6 @@ export const Menu = (props: Props) => {
                         </span>
                     </a>
                 </div>
-                <div class={cn(s.menuLinkWrapper)}>
-                    <a
-                        href="http://127.0.0.1:6081/upstream-manage.html"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        class={s.menuLink}
-                        id="smartdns_upstream"
-                    >
-                        <Icon class={s.linkIcon} icon="router" />
-                        <span class={theme.common.textOverflow}>
-                            {intl.getMessage('smartdns_upstream_manage')}
-                        </span>
-                    </a>
-                </div>
             </nav>
 
             <div class={s.referenceWrapper}>

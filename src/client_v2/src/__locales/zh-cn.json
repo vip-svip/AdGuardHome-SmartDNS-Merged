@@ -943,6 +943,5 @@
     "yes_reset": "重置",
     "view_file_table_action": "本地查看",
     "smartdns_ui": "SmartDNS",
-    "smartdns_upstream_manage": "上游服务器",
     "filter_add_file_label": "添加文件"
 }
