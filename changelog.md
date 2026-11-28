@@ -1,3 +1,9 @@
+## 20261205
+- **40251 侧栏「脚本」项移除**：`高级设置` 只剩 `隐私` 一项，证书与脚本都不再出现；仍旧用数组 spread `...[]` 等长替换，分组展开正常
+- **字体稳定**：7 处 `html { -webkit-tap-highlight-color: transparent; }` 换成 `-webkit-text-size-adjust: 100%`（等长）。关掉 Android WebView 的字体自动放大，长页面下方文本块不再在布局定型后被重新放大，标题不再跳
+- **开关区零位移延续**：圆点 `transition:none` + 全 `!0` 首帧，刷新时开关一个像素不动（25 帧连拍实测 5→7 帧像素差 0）
+- `tools/patch_frontend.py` 增加菜单「脚本」项与 `text-size-adjust` 两步，从原始二进制一键复现，对已 patch 版本幂等
+
 ## 20261204
 - **40251 侧栏「证书」项彻底移除**：`高级设置` 分组现在是 `隐私 / 脚本` 两项。做法是把菜单数组里那一项替换成 `...[],`（数组 spread 空占位，等长替换，27,132,064B 不变）。踩过的坑写进工具里：**用 `/*...*/` 注释虽然语法合法，但会让整个分组变成点不开**（实测点击只高亮、箭头不翻转、子项永不出现），所以 `tools/patch_frontend.py` 固定用 spread，不用注释
 - **开关圆点过渡置 none**：`.XkM1AwvjnBB5yZeXXHn1:before` 的 `transition: transform var(--t2), background-color var(--t2)` 改成 `transition:none`（4 份 CSS 副本全部改）。首帧不管 `checked` 是何时落到 DOM 上，圆点都直接停在终点，不会再「先关再滑到开」

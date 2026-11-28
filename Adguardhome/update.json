@@ -1,6 +1,6 @@
 {
-  "version": "20261204",
-  "versionCode": 20261204,
+  "version": "20261205",
+  "versionCode": 20261205,
   "zipUrl": "https://github.com/vip-svip/AdGuardHome-SmartDNS-Merged/releases/download/v20261204/AdGuardHome-SmartDNS-Merged-20261204.zip",
   "changelog": "[20261204] 40251 面板侧栏「高级设置」里的「证书」菜单项已删除（用数组 spread 空占位做等长替换；注意不能用 /*...*/ 注释——实测会让整个分组失去展开能力）。隐私页开关的滑动过渡（圆点 transform transition）统一置 none，首帧就直接停在最终位置，不再有「关→开」的位移动画；连同 20261130 的全 !0 首帧默认值，开关状态在页面加载全程只有一次正确绘制。二进制仍为 27,132,064B（4 处 CSS + 1 处菜单，全部等长）。"
 }

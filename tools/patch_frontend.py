@@ -82,6 +82,25 @@ def main(path: str, write: bool) -> int:
     print('switch-knob transition occurrences:', n_css)
     changed = changed.replace(css_old, css_new)
 
+    # 5) 侧栏「高级设置」里的「脚本」项同样删掉（数组最后一项，无尾逗号）
+    scr_old = '{label:"脚本",path:$t.Scripts,routePath:"Scripts"}'.encode()
+    si = changed.find(scr_old)
+    print('menu scripts item offset:', si)
+    if si >= 0:
+        scr_new = b'...[]' + b' ' * (len(scr_old) - 5)
+        assert len(scr_new) == len(scr_old)
+        changed = changed[:si] + scr_new + changed[si + len(scr_old):]
+
+    # 6) 关掉 Android/WebView 的字体自动放大（font boosting）：
+    #    html 规则里的 tap-highlight 换成 -webkit-text-size-adjust:100%（等长）。
+    #    不加这条时，长页面下方文本块会在布局宽度确定后被 boost 一次，表现为「标题字体跳一下」。
+    html_old = b'html {\n    -webkit-tap-highlight-color: transparent;\n}'
+    html_head = b'html {\n    -webkit-text-size-adjust: 100%;'
+    html_new = html_head + b' ' * (len(html_old) - len(html_head) - 2) + b'\n}'
+    n_html = changed.count(html_old)
+    print('html tap-highlight rules:', n_html)
+    changed = changed.replace(html_old, html_new)
+
     assert len(data) == len(changed)
     print('bytes before/after:', len(data), len(changed))
     open(path, 'wb').write(changed)
