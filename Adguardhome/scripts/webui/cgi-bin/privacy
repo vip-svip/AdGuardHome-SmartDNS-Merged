@@ -33,21 +33,25 @@ cors() {
     printf '\r\n'
 }
 
-# 一次 awk 解析全部键（旧版 10 次 sed = 10 个 fork ≈ 250ms）
+# 纯 shell 内建解析（零 fork）。旧版是 fork 一次 awk + 一次 eval，
+# 在低端机上光这两下就 30~40ms；GET 走同步 XHR，是首屏关键路径，fork 必须省。
+# 键白名单 + 值只接受 0/1，eval 不会注入。
 load_conf() {
     DNS=1; VPN=1; IP=1; NTP=1; DHCP=1; SMB=1; TCP=1; SNMP=1
     [ -f "$CONF" ] || return 0
-    _kv=$(awk -F= '
-        {
-            k = $1; v = $2
-            gsub(/[ \t\r]/, "", k); gsub(/[ \t\r]/, "", v)
-            sub(/[#;].*/, "", v)
-            if (v != "0" && v != "1") next
-            if (k == "dns" || k == "vpn" || k == "ip" ||
-                k == "ntp" || k == "dhcp" || k == "smb" || k == "tcp" || k == "snmp")
-                printf "%s=%s\n", toupper(k), v
-        }' "$CONF" 2>/dev/null)
-    eval "$_kv" 2>/dev/null
+    while IFS='=' read -r _k _v; do
+        _v=${_v%%[!0-9]*}
+        case "$_k" in
+            dns)  case "$_v" in 0) DNS=0 ;; 1) DNS=1 ;; esac ;;
+            vpn)  case "$_v" in 0) VPN=0 ;; 1) VPN=1 ;; esac ;;
+            ip)   case "$_v" in 0) IP=0 ;; 1) IP=1 ;; esac ;;
+            ntp)  case "$_v" in 0) NTP=0 ;; 1) NTP=1 ;; esac ;;
+            dhcp) case "$_v" in 0) DHCP=0 ;; 1) DHCP=1 ;; esac ;;
+            smb)  case "$_v" in 0) SMB=0 ;; 1) SMB=1 ;; esac ;;
+            tcp)  case "$_v" in 0) TCP=0 ;; 1) TCP=1 ;; esac ;;
+            snmp) case "$_v" in 0) SNMP=0 ;; 1) SNMP=1 ;; esac ;;
+        esac
+    done < "$CONF"
     return 0
 }
 
@@ -57,7 +61,13 @@ save_conf() {
 }
 
 # 静态页面里的首屏真值行（cgi 在同目录的上一级）
-HTML="${0%/*}/../privacy.html"
+# busybox httpd 跑 CGI 时 $0 只有文件名（没有目录），PWD 又在 cgi-bin 里，
+# 单靠 $0 推导会得到「privacy/../privacy.html」这种死路径 —— [ -f ] 永远 false，
+# 内联真值于是从安装以来一次都没被更新过（页面首帧一直显示旧状态）。
+# 先按固定安装路径找，找不到再退到 $0 推导、再退到上一级目录。
+HTML=/data/adb/agh/scripts/webui/privacy.html
+[ -f "$HTML" ] || HTML="${0%/*}/../privacy.html"
+[ -f "$HTML" ] || HTML="../privacy.html"
 
 # 把当前状态原地写回 privacy.html 的 `window.__AGH_PRIV={...};` 那一行。
 # 作用：首屏不再需要 ?embed=1 的二次 CGI 请求（静态文件 30ms 级就到），
@@ -67,16 +77,37 @@ inline_write() {
     [ -f "$HTML" ] || return 0
     _il=$(printf 'window.__AGH_PRIV={"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s};' \
         "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP")
-    [ "$(grep -m1 '^window.__AGH_PRIV=' "$HTML" 2>/dev/null)" = "$_il" ] && return 0
-    awk -v new="$_il" '/^window.__AGH_PRIV=/{print new; next} {print}' "$HTML" > "$HTML.tmp" 2>/dev/null \
+    # 旧版用 `^window.__AGH_PRIV=` 做行首匹配，可实际 HTML 里那行前面有缩进
+    # → grep 永远匹配不上、awk 也替换不了 → 内联真值从来没更新过，
+    # 6081 页面首屏一直显示第一次写入的旧状态。改成任意位置匹配。
+    [ "$(grep -m1 -o 'window.__AGH_PRIV={[^}]*}' "$HTML" 2>/dev/null)" = "${_il%;}" ] && return 0
+    awk -v new="$_il" '
+    BEGIN { BR = sprintf("%c", 125); SC = sprintf("%c", 59) }
+    {
+        i = index($0, "window.__AGH_PRIV=")
+        if (i > 0) {
+            s = substr($0, i)
+            k = index(s, BR)
+            if (k > 0) {
+                tail = substr(s, k + 1)
+                if (substr(tail, 1, 1) == SC) tail = substr(tail, 2)
+                $0 = substr($0, 1, i - 1) new tail
+            }
+        }
+        print
+    }' "$HTML" > "$HTML.tmp" 2>/dev/null \
         && mv -f "$HTML.tmp" "$HTML" 2>/dev/null \
         || rm -f "$HTML.tmp" 2>/dev/null
     return 0
 }
 
 state_write() {
-    _json=$(printf '{"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":1}' \
-        "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP")
+    # applied 不再硬编码 1：只看 apply() 成功后写的 stamp 在不在。
+    # 旧版无论 iptables 是否真的建成链都回 applied:1，页面于是永远显示"已生效"。
+    _ap=${_ap:-0}
+    [ -f "$STAMP" ] && _ap=1
+    _json=$(printf '{"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":%s}' \
+        "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP" "$_ap")
     printf '%s\n' "$_json" > "$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE" 2>/dev/null
     # 连同响应头一起落盘：GET 命中时整个响应只需一次 cat（~20ms）
     { cors; printf '%s\n' "$_json"; } > "$RESP.tmp" 2>/dev/null && mv -f "$RESP.tmp" "$RESP" 2>/dev/null
@@ -222,7 +253,13 @@ apply() {
     fi
     swap_in ipt6
 
-    printf '%s' "$_sig" > "$STAMP" 2>/dev/null
+    # stamp 只在链确实挂上时才写：旧版无条件写，轮到 iptables 建链失败（个别 ROM
+    # 没有 iptables-restore、或 xtables 锁被占死）也照样写，页面就一直显示 applied:1
+    if ipt -C OUTPUT -j $CHAIN 2>/dev/null; then
+        printf '%s' "$_sig" > "$STAMP" 2>/dev/null
+    else
+        rm -f "$STAMP" 2>/dev/null
+    fi
     return 0
 }
 
@@ -284,29 +321,37 @@ case "$REQUEST_METHOD" in
         apply
         state_write
         cors
-        printf '{"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":1}\n' \
-            "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP"
+        printf '%s\n' "$_json"
         ;;
     *)
-        # GET：只读，绝不动 iptables。命中预生成响应（含响应头）就是一次 cat。
-        # 缓存缺失/被 ?sync=1 强制时，同步算一次（约 0.1~0.2s，仅首次）
+        # GET：只读，绝不动 iptables。
+        #
+        # 缓存失效旧做法是 `[ "$CONF" -nt "$RESP" ]`（比 mtime），实测有两个洞：
+        #   ① 还原备份（cp -p / tar / 恢复出厂脚本）后 conf 的 mtime 不变或更旧
+        #      → 判定"没改过" → 缓存永不刷新，页面长期显示旧状态；
+        #      （真机上踩到过：privacy.conf 里 smb=1，CGI 一直回 smb:0）
+        #   ② 同一秒内先改 conf 再请求（多数 /data 是 1 秒精度）→ 判 false
+        # 现在改成拿 conf 现算一遍 JSON，和落盘的 STATE 做**内容比对**，
+        # 只有内容完全一致才直接用缓存；否则重写 STATE/RESP 并同步 privacy.html 内联值。
+        # 开销：一次 awk + 一次 cat，约 30ms，比 mtime 判断可靠的代价。
+        load_conf
+        _ap=0
+        [ -f "$STAMP" ] && _ap=1
+        _json=$(printf '{"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":%s}' \
+            "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP" "$_ap")
         case "$QUERY_STRING" in
-            *sync=1*) rm -f "$RESP" 2>/dev/null ;;
+            *sync=1*) rm -f "$STATE" 2>/dev/null ;;
         esac
-        # 外部改过 privacy.conf 就重建缓存（-nt 内建，不 fork）
-        [ -f "$CONF" ] && [ -f "$RESP" ] && [ "$CONF" -nt "$RESP" ] && rm -f "$RESP" 2>/dev/null
-        if [ -s "$RESP" ]; then
-            cat "$RESP" 2>/dev/null
-            exit 0
-        fi
-        refresh_state
-        if [ -s "$RESP" ]; then
-            cat "$RESP" 2>/dev/null
+        # 缓存就是当前真值时直接输出，只比字符串：read 是内建，不 fork。
+        # （旧版 cat/tr 各 fork 一次，2~5ms 也是首屏时间）
+        _st=""
+        [ -s "$STATE" ] && IFS= read -r _st < "$STATE" 2>/dev/null
+        if [ "$_st" = "$_json" ]; then
+            :   # 值没变，STATE/RESP 不用重写；内联行在 POST/refresh 时已对齐
         else
-            load_conf
-            cors
-            printf '{"dns":%s,"vpn":%s,"ip":%s,"ntp":%s,"dhcp":%s,"smb":%s,"tcp":%s,"snmp":%s,"applied":1}\n' \
-                "$DNS" "$VPN" "$IP" "$NTP" "$DHCP" "$SMB" "$TCP" "$SNMP"
+            state_write
         fi
+        cors
+        printf '%s\n' "$_json"
         ;;
 esac
